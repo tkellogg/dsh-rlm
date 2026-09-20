@@ -43,5 +43,19 @@ mailboxes, handles, and external effects are never presented as live state.
 Checkpoint files use `dill`. Load only session directories controlled by the
 local user because a malicious checkpoint can execute code while loading.
 
-The DSH bridge is not part of this package yet. `connect()` and the runtime
-`tools`, `models`, and `processes` namespaces currently fail explicitly.
+## Subprocess bridge
+
+Run one kernel as a bounded JSON-lines subprocess for the DSH plugin:
+
+```sh
+uv run python -m dsh_rlm.bridge --session-dir .dsh-rlm/example
+```
+
+Standard output is reserved for protocol responses. Requests use
+`{"id":"1","method":"execute","source":"40 + 2"}`. The bridge limits request
+and source sizes, returns bounded cell and checkpoint data, and includes the
+one-shot `recovery_notice` after an interrupted run.
+
+`connect()` and the runtime `tools`, `models`, and `processes` namespaces still
+fail explicitly. The out-of-tree plugin owns process management and DSH tool
+integration.

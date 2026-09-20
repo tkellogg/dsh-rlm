@@ -1,0 +1,38 @@
+{
+  "name": "@dsh-rlm/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persistent Python RLM tool for DeepSeek Harness",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf lib",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-agent": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-subprocess": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.1.6-alpha.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.12",
+    "typescript": "5.9.3"
+  }
+}

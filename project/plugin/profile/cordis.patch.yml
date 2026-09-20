@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-rlm
+      name: '@dsh-rlm/plugin'
