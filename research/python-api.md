@@ -1,8 +1,10 @@
 # Shared Python API
 
-Status: draft for review, not implementation. `dsh_rlm` is a working package name.
-This API serves both ordinary code agents and RLMs. See the [runtime](runtime-tasks.md),
-[messaging](messaging.md), and [REPL](rlm-loop.md) specs.
+Status: partially implemented. The local runtime, REPL, tasks, mailboxes, checkpoints,
+and active-cell DSH tool/model callbacks are working. `connect`, `spawn_rlm`, process
+wrappers, model discovery, and durable background host invocations remain design.
+See the [runtime](runtime-tasks.md), [messaging](messaging.md), and
+[REPL](rlm-loop.md) specs.
 
 ## Rules
 
@@ -268,39 +270,46 @@ a bounded batch so a stream of messages does not monopolize the loop. See the
 
 ## Tools and model calls
 
+The working bridge API is:
+
 ```python
 class Tools:
-    async def list(self) -> list["ToolInfo"]: ...
-    async def call(
-        self, name: str, arguments: dict[str, Any] | None = None,
-        *, timeout: float | None = None,
-    ) -> Any: ...
+    async def list(self) -> list[dict[str, Any]]: ...
+    async def call(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
 
 class Models:
-    async def find(self, query: str = "") -> list["ModelInfo"]: ...
     async def complete(
         self, prompt: str, *, system: str | None = None,
-        model: str | None = None, thinking: str | None = None,
-        max_output_tokens: int | None = None, timeout: float | None = None,
-    ) -> "ModelResponse": ...
+        provider: str | None = None, model: str | None = None,
+        reasoning_effort: str | None = None, max_tokens: int | None = None,
+    ) -> dict[str, Any]: ...
 ```
 
-`tools.call` uses DSH's guarded tool path and returns its structured JSON value,
-not rendered prose. It raises `ToolError` on tool failure. Tool arguments live in
-a dictionary so names such as `timeout` cannot collide with API options.
-Initially these calls execute one at a time per owning DSH Agent; starting them
-with `asyncio.gather` does not promise parallel execution. That queue is separate
-from cell execution. Re-entering the same REPL as a tool is rejected. Calls from
-background workers use fresh execution context, not their spawning cell's token;
-see the [DSH integration checks](deadlocks.md#dsh-integration-findings).
+`tools.list` returns DSH's scoped schemas, excluding `execute_python` and
+`subagent_fork`. `tools.call` uses `ToolRuntime.execute` with the owning Agent,
+outer root call ID, parent execution token, initiator scope, permissions,
+approvals, and cancellation. It returns the tool's structured JSON value.
+Nested tool calls are serialized because DSH does not expose the agent loop's
+tool scheduler as a public plugin API. Same-bridge re-entry is rejected both by
+name and by causal `AsyncLocalStorage` identity.
 
-`models.complete` waits for one model response. It does not spawn an agent, run
-tools, or silently add the calling RLM's conversation. `ModelResponse` contains
-`text`, the resolved `model`, and token usage when available. `ToolInfo` contains
-`name`, `description`, `input_schema`, and `output_schema`; `ModelInfo` contains
-`selector`, `provider`, and `name`. These are immutable records. Unsupported model
-options fail clearly. Calls pass through host routing, budgets, and logging;
-no raw provider client or unrestricted DSH context is exposed.
+`models.complete` performs one auxiliary, no-tools DSH model call. It defaults to
+the current request's provider, model, and reasoning effort. A route override
+must provide both `provider` and `model`. The result contains `text`, `provider`,
+`model`, `finish`, and `usage`; model-emitted tool calls are rejected.
+Independent model calls may run concurrently and correlate out of order.
+
+Both APIs require the `host-callback-v1` capability and the live
+`execute_python` cell that created them. Every host call must settle or be
+revoked before that outer call resolves. A persistent background task cannot
+reuse the completed cell's token; a future background API needs a fresh owned
+invocation. The host applies a 120-second callback deadline plus bounded payload,
+count, and in-flight limits. Nested operations traverse normal host middleware,
+but this out-of-tree slice records them only within the durable outer
+`execute_python` call rather than as separate session events.
+
+Model discovery, per-call timeout parameters, and fresh background invocation
+contexts remain future API.
 
 ## Commands
 
@@ -362,8 +371,8 @@ class Question(BaseModel):
 async def worker(rt: Runtime[Question]) -> str:
     message = await rt.mailbox.receive()
     answer = await rt.models.complete(message.body.text)
-    await rt.send(answer.text, to=message.body.reply_to or message.sender)
-    return answer.text
+    await rt.send(answer["text"], to=message.body.reply_to or message.sender)
+    return answer["text"]
 
 child = await runtime.spawn(
     worker, name="reviewer", mailbox=MailboxConfig(message_type=Question),

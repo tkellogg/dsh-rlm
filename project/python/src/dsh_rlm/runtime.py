@@ -51,6 +51,22 @@ _LIVE_RUNTIMES: weakref.WeakValueDictionary[str, Runtime[Any]] = (
     weakref.WeakValueDictionary()
 )
 
+_HostCallback = Callable[[str, str, dict[str, Any]], Awaitable[Any]]
+
+
+@dataclass(slots=True)
+class _HostCallbackScope:
+    state: _RuntimeState
+    parent_id: str
+    callback: _HostCallback
+    active: bool = True
+    calls: int = 0
+
+
+_HOST_CALLBACK_SCOPE: contextvars.ContextVar[_HostCallbackScope | None] = (
+    contextvars.ContextVar("dsh_rlm_host_callback_scope", default=None)
+)
+
 
 @dataclass(frozen=True)
 class AgentRef:
@@ -84,6 +100,95 @@ class AgentHandle(AgentRef, Generic[T]):
 class _RuntimeState:
     def __init__(self) -> None:
         self.registry = _MailboxRegistry()
+
+
+async def _invoke_host_callback(
+    runtime: Runtime[Any], method: str, params: dict[str, Any]
+) -> Any:
+    scope = _HOST_CALLBACK_SCOPE.get()
+    if scope is None or scope.state is not runtime._state or not scope.active:
+        raise UnsupportedOperationError(
+            f"{method} requires an active bridge execute cell with "
+            'capability "host-callback-v1"'
+        )
+    return await scope.callback(scope.parent_id, method, params)
+
+
+class Tools:
+    """Host tools available to an opted-in bridge execute cell."""
+
+    def __init__(self, runtime: Runtime[Any]) -> None:
+        self._runtime = runtime
+
+    async def list(self) -> Any:
+        return await _invoke_host_callback(self._runtime, "tools.list", {})
+
+    async def call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        if not isinstance(name, str) or not name:
+            raise TypeError("name must be a non-empty string")
+        if name in {"execute_python", "subagent_fork"}:
+            raise UnsupportedOperationError(
+                f"tool {name!r} is not callable from Python"
+            )
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments must be a dictionary")
+        return await _invoke_host_callback(
+            self._runtime,
+            "tools.call",
+            {"name": name, "arguments": arguments},
+        )
+
+
+class Models:
+    """Host model completion available to an opted-in bridge execute cell."""
+
+    def __init__(self, runtime: Runtime[Any]) -> None:
+        self._runtime = runtime
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
+    ) -> Any:
+        if not isinstance(prompt, str):
+            raise TypeError("prompt must be a string")
+        for name, value in (
+            ("system", system),
+            ("provider", provider),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{name} must be a string or None")
+        if (provider is None) != (model is None):
+            raise ValueError("provider and model must be supplied together")
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or max_tokens <= 0
+            or max_tokens > 1_000_000
+        ):
+            raise TypeError(
+                "max_tokens must be an integer from 1 through 1000000 or None"
+            )
+        params: dict[str, Any] = {"prompt": prompt}
+        for name, value in (
+            ("system", system),
+            ("provider", provider),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+            ("max_tokens", max_tokens),
+        ):
+            if value is not None:
+                params[name] = value
+        return await _invoke_host_callback(self._runtime, "models.complete", params)
 
 
 class _UnavailableNamespace:
@@ -143,8 +248,8 @@ class Runtime(Generic[M]):
         self._context_token: contextvars.Token[Runtime[Any] | None] | None = None
         self._handle: AgentHandle[Any] | None = None
         self._rlm = rlm
-        self.tools = _UnavailableNamespace("tools")
-        self.models = _UnavailableNamespace("models")
+        self.tools = Tools(self)
+        self.models = Models(self)
         self.processes = _UnavailableNamespace("processes")
         self.recovery = None
         self.mailboxes = Mailboxes(self, self._state.registry)
@@ -284,6 +389,22 @@ class Runtime(Generic[M]):
             yield self
         finally:
             _CURRENT_RUNTIME.reset(token)
+
+    @asynccontextmanager
+    async def _bind_host_callbacks(
+        self, parent_id: str, callback: _HostCallback
+    ) -> AsyncIterator[None]:
+        """Enable bridge callbacks for this cell and its task descendants."""
+        scope = _HostCallbackScope(self._state, parent_id, callback)
+        token = _HOST_CALLBACK_SCOPE.set(scope)
+        try:
+            yield
+        finally:
+            scope.active = False
+            close = getattr(callback, "close", None)
+            if close is not None:
+                close()
+            _HOST_CALLBACK_SCOPE.reset(token)
 
     async def close(self) -> None:
         """Close this run and request cancellation of its children.

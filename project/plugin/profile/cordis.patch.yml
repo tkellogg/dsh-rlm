@@ -1,3 +1,15 @@
+# Source-checkout profile patch. Its base URL is profile/, so the provider's
+# relative module path differs from the package-root bundle patch.
 - insert:
-    - id: dsh-rlm
-      name: '@dsh-rlm/plugin'
+    - id: dsh-rlm-preset-root
+      name: ../lib/preset-root.js
+
+- id: agent-presets
+  inject: [rlmPresetRoot]
+  config:
+    default: rlm
+    roots:
+      - path: !!js ctx.rlmPresetRoot.path
+        trust: system
+    includeShippedRoot: true
+    includeUserRoot: true

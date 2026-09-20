@@ -1,6 +1,6 @@
 # RLM loop: CPython
 
-Status: decided direction; not implemented.
+Status: the persistent CPython loop, recovery path, and RLM Agent Preset are implemented; durable background host invocations remain future work.
 
 ## Decision
 
@@ -13,6 +13,15 @@ Its loop is:
 2. If the action contains code, execute one cell.
 3. Return the selected output or error to the model.
 4. Repeat until the model finishes or the agent is stopped.
+
+The implemented DSH `rlm` preset keeps DSH's outer model/tool loop but changes
+the root controller surface: the model sees only `execute_python`, and Python
+routes nested DSH tools and auxiliary no-tools model calls through the active
+host execution. This makes Python the controller state without replacing DSH's
+single `AgentFactory`. The controller prompt and Python tool are installed only
+for live runtime roots. Spawned children use the Standard worker surface. The root callback API filters
+and rejects `subagent_fork`, so the root controller prompt cannot be copied into
+a fork; ordinary spawned children keep the Standard fork tool.
 
 ## Python execution
 

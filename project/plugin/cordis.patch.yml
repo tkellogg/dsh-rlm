@@ -1,0 +1,16 @@
+# Bundle patch: expose this package's RLM preset without replacing the DSH
+# shipped or user-authored preset roots. The provider resolves from import.meta.url
+# after installation instead of assuming where the consuming profile lives.
+- insert:
+    - id: dsh-rlm-preset-root
+      name: ./lib/preset-root.js
+
+- id: agent-presets
+  inject: [rlmPresetRoot]
+  config:
+    default: rlm
+    roots:
+      - path: !!js ctx.rlmPresetRoot.path
+        trust: system
+    includeShippedRoot: true
+    includeUserRoot: true

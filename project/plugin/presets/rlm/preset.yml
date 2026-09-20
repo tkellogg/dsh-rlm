@@ -1,0 +1,3 @@
+name: RLM Mode
+description: A persistent Python controller that reaches tools and models through the structured runtime API.
+order: 2

@@ -1,11 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-presets/types'
+import type {} from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { BridgePool, type BridgePoolOptions } from './bridge-client.js'
+import { createHostCallbackDispatcher, createHostCallbackExecution } from './host-callbacks.js'
 import type { ExecuteResult } from './protocol.js'
 
 export const name = 'dsh-rlm'
-export const inject = ['tools', 'subprocess']
+export const inject = ['tools', 'subprocess', 'agents', 'llm']
 
 /** Optional overrides. Environment variables remain the normal configuration path. */
 export interface Config extends BridgePoolOptions {}
@@ -93,19 +96,10 @@ function renderResult(value: ExecuteResult): string {
   return sections.join('\n\n')
 }
 
-/** Register the native execute_python tool and its owner-scoped bridge pool. */
+/** Register the native execute_python tool in this preset's standing tool scope. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const pool = new BridgePool(ctx.subprocess, config)
-
-  ctx.effect(() => async () => {
-    await pool.dispose()
-  }, 'dsh-rlm Python bridge cleanup')
-
-  ctx.on('agent/disposed', ({ agent }) => {
-    void pool.disposeAgent(String(agent.id))
-  })
-
-  ctx.tools.register(defineTool({
+  const pool = new BridgePool(ctx.subprocess, config, createHostCallbackDispatcher(ctx))
+  const tool = defineTool({
     name: 'execute_python',
     description: "Execute a Python cell in this agent's persistent RLM session. Variables and imports persist across calls, and successful cells are checkpointed for crash recovery.",
     parameters: {
@@ -120,12 +114,38 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{ type: 'text', text: renderResult(value) }],
     },
     async execute(args, exec) {
-      const agent = exec.agent
-      if (agent === undefined) throw new Error('execute_python requires an owning agent')
-      return pool.execute(String(agent.id), args.source, exec.signal)
+      const owner = exec.agent
+      if (owner === undefined || ctx.agents.get(owner.id) !== owner
+        || !ctx.agents.roots().includes(owner)) {
+        throw new Error('execute_python requires a live root agent')
+      }
+      return await pool.execute(
+        String(owner.id),
+        args.source,
+        exec.signal,
+        createHostCallbackExecution(exec),
+      )
     },
     presentCall: () => ({ card: 'generic', title: 'Execute Python' }),
-  }))
+  })
+
+  ctx.effect(() => {
+    const unregister = ctx.tools.register(tool)
+    return async () => {
+      unregister()
+      await pool.dispose()
+    }
+  }, 'dsh-rlm Python bridge and tool cleanup')
+
+  const retireAgent = (agentId: string): void => {
+    void pool.disposeAgent(agentId).catch(error => {
+      ctx.logger.warn(`dsh-rlm: failed to retire Python bridge for agent ${agentId}: ${String(error)}`)
+    })
+  }
+  ctx.on('agent/disposed', ({ agent }) => { retireAgent(String(agent.id)) })
+  ctx.on('agent-preset/selected', (sessionId, preset) => {
+    if (preset !== 'rlm') retireAgent(String(sessionId))
+  })
 }
 
 export type { CellResult, CheckpointResult, ExecuteResult, ValueIssue } from './protocol.js'

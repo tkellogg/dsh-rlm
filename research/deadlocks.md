@@ -1,6 +1,6 @@
 # Deadlocks and stalled work
 
-Status: design review; these checks have not been implemented or tested here.
+Status: reviewed. The known bridge cycles and bounds below are implemented and tested; general application-level cycle detection is intentionally not attempted.
 
 Waiting is not always a deadlock. An idle service can intentionally wait for its
 next message. The problem is waiting when the work that would release the wait
@@ -69,16 +69,16 @@ Checked source at commit `ddefc45fbc7f8e46dd73185e68295696d1297887`:
 - Public `ToolRuntime.execute` runs permission, approval, and cancellation checks.
   It does not provide the agent loop's scheduling of concurrent tool calls. The
   internal PTC scheduler is not a public plugin API.
-- PTC mode requires nested calls to carry the enclosing code call's token. A
-  worker that outlives that cell cannot keep using its finished execution context.
-  Start the integration in native tool mode with a code-first prompt, not PTC mode.
-- Background tool calls remain a requirement. Give each a fresh invocation, the
-  live owning Agent, and task-owned cancellation. Prove correct logging without
-  inventing model tool calls or reusing the completed cell's token. This is an
-  integration test to pass, not a verified implementation.
-- Initially serialize Python tool calls per owning Agent, separately from the
-  cell queue. Reject calls back into the same REPL through `execute_code` or
-  equivalent aliases. Do not solve reentrancy by allowing concurrent cells.
+- Nested transport calls carry the enclosing `execute_python` token, owning
+  Agent, root call ID, initiator scope, and cancellation signal. That authority
+  expires with the cell. A persistent task that calls afterward fails locally.
+- Durable background host calls remain future work. They need a fresh owned
+  invocation and logging context; the implementation deliberately does not
+  retain the completed cell's token.
+- Python tool calls are serialized separately from the cell queue. Calls back
+  into the same bridge are rejected by tool name and causal bridge identity.
+  Concurrent cells are never used to solve reentrancy. Auxiliary model calls can
+  run concurrently and correlate out of order.
 - DSH has no global parent/child model semaphore. Capacity deadlocks would arise
   from limits we add or a provider adapter; do not hold a model slot while waiting
   for a child agent to finish.
@@ -96,9 +96,9 @@ Checked source at commit `ddefc45fbc7f8e46dd73185e68295696d1297887`:
 - A slow cell can await a host tool call and receive its reply. Repeat with tool
   concurrency set to one and with approval pending; nested execution must work
   or fail explicitly, not hang. Recursive calls into the same REPL fail promptly.
-- A worker continues after its spawning cell returns, calls a host tool, and gets
-  a properly authorized, logged result. Cancelling the old cell must not cancel
-  this independent call. Cancelling the worker must request cancellation of it.
+- Remaining: give a worker that outlives its spawning cell a fresh host
+  invocation before allowing it to call tools. Today that call is rejected, so a
+  stale cell token cannot escape into background work.
 - A parent awaiting its child's result does not prevent the child making a model
   call. Exhausted child capacity produces a clear error.
 - A full mailbox rejects a send without blocking unrelated agents. Closing an

@@ -14,7 +14,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 from .checkpoint import CheckpointReport, CheckpointStore, RestoreReport, ValueIssue
 from .recovery import RecoveryReport
@@ -394,8 +394,24 @@ class LocalKernel:
             )
         return report
 
-    async def execute(self, source: str) -> CellResult:
-        """Execute one cell and checkpoint it only when it succeeds."""
+    async def execute(
+        self,
+        source: str,
+        *,
+        callback_parent_id: str | None = None,
+        host_callback: Callable[[str, str, dict[str, Any]], Awaitable[Any]]
+        | None = None,
+    ) -> CellResult:
+        """Execute one cell and checkpoint it only when it succeeds.
+
+        Host callbacks are enabled only while the REPL is evaluating the cell.
+        The bridge supplies both callback arguments together for an opted-in
+        execute request; ordinary local kernels remain unsupported.
+        """
+        if (callback_parent_id is None) != (host_callback is None):
+            raise ValueError(
+                "callback_parent_id and host_callback must be supplied together"
+            )
         async with self._get_operation_lock():
             if self._closed:
                 raise RuntimeError("LocalKernel is closed")
@@ -406,7 +422,13 @@ class LocalKernel:
             self._latest_cell_ok = False
             try:
                 async with self.runtime.bind():
-                    result = await self.repl.execute(source)
+                    if host_callback is None or callback_parent_id is None:
+                        result = await self.repl.execute(source)
+                    else:
+                        async with self.runtime._bind_host_callbacks(
+                            callback_parent_id, host_callback
+                        ):
+                            result = await self.repl.execute(source)
                 if self._closed:
                     return result
                 self._latest_cell_ok = result.ok
@@ -438,8 +460,12 @@ class LocalKernel:
         self._notice_taken = True
         return self.recovery_notice
 
-    async def close(self) -> None:
-        """Stop owned work without waiting behind an unbounded user cell."""
+    async def close(self, *, interruption_cause: str | None = None) -> None:
+        """Stop owned work without waiting behind an unbounded user cell.
+
+        ``interruption_cause`` records a transport-forced shutdown even if the
+        active cell finishes at the same time cancellation is requested.
+        """
         async with self._get_close_lock():
             if self._closed:
                 return
@@ -489,13 +515,16 @@ class LocalKernel:
                     for child in tuple(self.runtime._children)
                 )
                 interrupted = (
-                    active_interrupted
+                    interruption_cause is not None
+                    or active_interrupted
                     or raw_tasks_interrupted
                     or runtime_tasks_interrupted
                     or surviving_raw
                     or surviving_runtime
                 )
                 causes: list[str] = []
+                if interruption_cause is not None:
+                    causes.append(interruption_cause)
                 if active_interrupted:
                     causes.append("a cell execution was interrupted")
                 if raw_tasks_interrupted or runtime_tasks_interrupted:
