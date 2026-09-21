@@ -3,10 +3,10 @@
 These recipes describe the APIs in this source checkout. They do **not** imply that an already-running DSH host has been rebuilt or restarted.
 
 
-## Run a continuous non-RLM function agent
+## Run a continuous program agent
 
-An ordinary agent is an async function scheduled as a cooperative `asyncio.Task`.
-Pass the function to `runtime.spawn`; its argument is the child's isolated
+A **program agent** is an async function at the root of a cooperative `asyncio.Task`. It has no autonomous LLM loop; it uses the same runtime APIs, including tools, models, messaging, and subagent operations when its authority permits them.
+Pass the function to `runtime.spawn_program`; its argument is the child's isolated
 `Runtime`. The function may return promptly or keep running and receiving bounded
 messages until cancellation:
 
@@ -26,7 +26,7 @@ async def echo_agent(child):
         # Release resources here. Cancellation is cooperative.
         pass
 
-handle = await runtime.spawn(
+handle = await runtime.spawn_program(
     echo_agent,
     name="echo-agent",
     mailbox=MailboxConfig(message_type=str, capacity=8),
@@ -51,7 +51,7 @@ kill request implemented with task cancellation: the function receives
 `asyncio.CancelledError` at its next cancellation point and must not suppress it
 indefinitely. `handle.wait()`, `status()`, `done()`, and `cancelled()` expose the
 lifecycle. Closing the parent also cancels its live children and closes their
-mailboxes. Ordinary agents are process-live only and are not restored or replayed
+mailboxes. Program agents are process-live only and are not restored or replayed
 after a crash.
 
 ## Discover tools without expanding every schema
@@ -142,7 +142,7 @@ async def worker(child_runtime):
     )
     return receipt.message_id
 
-handle = await runtime.spawn(worker, name="progress-worker")
+handle = await runtime.spawn_program(worker, name="progress-worker")
 message_id = await handle.task
 ```
 
@@ -181,7 +181,7 @@ count = await worker          # also: await worker.task / await worker.result()
 
 The entry receives the owning interpreter’s root runtime, not a local child runtime. Here “root” is per RLM interpreter: it can belong to a DSH RLM subagent and does not mean only the top-level DSH agent. `timeout=None` is allowed and leaves lifetime bounded by the owning process/agent/bridge; it does not make the worker durable. The optional timeout covers the worker's whole lifetime. Individual background host calls have a 120-second maximum/default deadline.
 
-Authority belongs to the exact admitted `asyncio.Task`. A raw task created inside it does **not** inherit the lease, nor do ordinary `asyncio.create_task`, `runtime.spawn`, restored tasks, or tasks predating admission. Each call rechecks the live owner and current policy. Fresh root tool dispatch works in effective `native` and `both` presentation modes; effective PTC rejects it rather than bypassing presentation policy.
+Authority belongs to the exact admitted `asyncio.Task`. A raw task created inside it does **not** inherit the lease, nor do raw `asyncio.create_task`, program agents, restored tasks, or tasks predating admission. Each call rechecks the live owner and current policy. Fresh root tool dispatch works in effective `native` and `both` presentation modes; effective PTC rejects it rather than bypassing presentation policy.
 
 ```python
 for outcome in runtime.host_workers.inspect_outcomes():

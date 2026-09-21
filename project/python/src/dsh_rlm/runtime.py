@@ -85,8 +85,8 @@ class AgentRef:
 
 
 @dataclass(frozen=True)
-class AgentHandle(AgentRef, Generic[T]):
-    """Identity plus the actual asyncio task for a local agent run."""
+class ProgramAgentHandle(AgentRef, Generic[T]):
+    """Control handle for a local program agent rooted at an async function."""
 
     task: asyncio.Task[T]
     _runtime: Runtime[Any] = field(repr=False, compare=False, default=None)
@@ -121,6 +121,10 @@ class AgentHandle(AgentRef, Generic[T]):
     async def wait(self) -> T:
         """Wait for the function result, failure, or cancellation."""
         return await self.task
+
+
+# Compatibility name retained for existing callers; new code should use ProgramAgentHandle.
+AgentHandle = ProgramAgentHandle
 
 
 class _RuntimeState:
@@ -286,7 +290,7 @@ class Runtime(Generic[M]):
         self._children: set[Runtime[Any]] = set()
         self._owned_mailboxes: set[Mailbox[Any]] = set()
         self._context_token: contextvars.Token[Runtime[Any] | None] | None = None
-        self._handle: AgentHandle[Any] | None = None
+        self._handle: ProgramAgentHandle[Any] | None = None
         self._rlm = rlm
         self._started_at = __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc
@@ -320,14 +324,14 @@ class Runtime(Generic[M]):
     def authoritative(self) -> bool:
         return not self._closed and _LIVE_RUNTIMES.get(self.agent_id) is self
 
-    async def spawn(
+    async def spawn_program(
         self,
         entry: Callable[[Runtime[Any]], Awaitable[T]],
         *,
         name: str | None = None,
         mailbox: MailboxConfig | None = None,
-    ) -> AgentHandle[T]:
-        """Admit and schedule one child without waiting for user code."""
+    ) -> ProgramAgentHandle[T]:
+        """Admit a program agent rooted at ``entry`` without waiting for it."""
         if not self.authoritative:
             raise MailboxClosedError(self.mailbox.id)
         if not callable(entry):
@@ -342,7 +346,7 @@ class Runtime(Generic[M]):
             _parent_runtime=self,
         )
         task: asyncio.Task[T] = loop.create_task(child._execute(entry), name=name)
-        handle: AgentHandle[T] = AgentHandle(
+        handle: ProgramAgentHandle[T] = ProgramAgentHandle(
             child.agent_id,
             child.name,
             child.session_id,
@@ -355,6 +359,16 @@ class Runtime(Generic[M]):
         task.add_done_callback(child._task_done)
         return handle
 
+    async def spawn(
+        self,
+        entry: Callable[[Runtime[Any]], Awaitable[T]],
+        *,
+        name: str | None = None,
+        mailbox: MailboxConfig | None = None,
+    ) -> ProgramAgentHandle[T]:
+        """Backward-compatible alias for :meth:`spawn_program`."""
+        return await self.spawn_program(entry, name=name, mailbox=mailbox)
+
     async def spawn_rlm(
         self,
         prompt: str,
@@ -362,7 +376,7 @@ class Runtime(Generic[M]):
         name: str | None = None,
         model: str | None = None,
         thinking: str | None = None,
-    ) -> AgentHandle[str]:
+    ) -> ProgramAgentHandle[str]:
         raise UnsupportedOperationError("spawn_rlm is outside the pure-Python core")
 
     async def send(

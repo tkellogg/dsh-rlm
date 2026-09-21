@@ -1,4 +1,4 @@
-# Runtime tasks as agents
+# Program agents
 
 Status: process-live managed host workers are implemented and source/test accepted; default process placement, parent-end policy, and child permission narrowing remain open.
 See the [Python API draft](python-api.md) for proposed classes and methods.
@@ -9,10 +9,11 @@ An agent is a running program registered with the shared runtime. It has an
 identity, a parent when created by another agent, and access to messages and
 permitted runtime operations. It does not need to call a model.
 
-An ordinary agent runs its own program. An [RLM agent](rlm-loop.md) repeatedly
-asks a model for code to execute. Both use the same API for
-[messages](messaging.md), tools, model calls, and starting children. A program
-uses only the parts it needs.
+A **program agent** runs an async function as its root program, with no autonomous
+LLM loop. An [RLM agent](rlm-loop.md) repeatedly asks a model for code to execute.
+Both use the same runtime API for [messages](messaging.md), tools, explicit model
+calls, and starting subagents; a program agent may call a model or launch a
+subagent explicitly without becoming an RLM agent.
 
 ## Execution
 
@@ -48,7 +49,7 @@ RLM sessions can resume after restart. Execution starts fresh. Interrupted tasks
 do not restart automatically. Restore saved REPL values where possible and tell
 the RLM what was lost; see [REPL recovery](rlm-loop.md#restart).
 
-Ordinary code agents are not durable. Do not restore or automatically rerun them.
+Program agents are not durable. Do not restore or automatically rerun them.
 A resumed parent must see which workers ended or have an unknown outcome; old
 handles must not appear live. Mailboxes register again on startup; old
 registrations and queued messages do not survive.

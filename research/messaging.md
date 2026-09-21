@@ -1,6 +1,6 @@
 # Messaging
 
-Status: bounded driver-inbox delivery and typed local mailboxes are implemented and source/test accepted; the public address/type API and non-RLM delivery policy remain open.
+Status: bounded driver-inbox delivery and typed local mailboxes are implemented and source/test accepted; the public address/type API and program-agent delivery policy remain open.
 
 ## Mailboxes
 
@@ -83,7 +83,7 @@ mailboxes for arbitrary Python tasks.
 
 - Type-signature format and how senders discover it.
 - Mailbox addresses, permissions, queue limits, and send time limits.
-- Whether non-RLM mailboxes accept delivery modes or reject them.
+- Whether program-agent mailboxes accept RLM delivery modes or reject them.
 
 ## Sources
 

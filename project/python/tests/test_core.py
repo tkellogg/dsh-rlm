@@ -13,6 +13,7 @@ from dsh_rlm import (
     MessageValidationError,
     NoParentError,
     PermissionDeniedError,
+    ProgramAgentHandle,
     Runtime,
     RuntimeUnavailableError,
     UnsupportedDeliveryModeError,
@@ -52,7 +53,7 @@ async def test_current_runtime_is_task_local_and_spawn_does_not_wait_for_receive
 
 
 @pytest.mark.asyncio
-async def test_function_agent_runs_continuously_messages_both_ways_and_cancels():
+async def test_program_agent_runs_continuously_messages_both_ways_and_cancels():
     root = Runtime()
     replies = await root.mailboxes.create(
         config=MailboxConfig(message_type=str, capacity=4)
@@ -70,12 +71,13 @@ async def test_function_agent_runs_continuously_messages_both_ways_and_cancels()
             stopped.set()
 
     async with root.bind():
-        handle = await root.spawn(
+        handle = await root.spawn_program(
             echo_agent,
             name="echo-agent",
             mailbox=MailboxConfig(message_type=str, capacity=4),
         )
         await started.wait()
+        assert isinstance(handle, ProgramAgentHandle)
         assert await handle.status() == "running"
 
         first = await handle.send("one")

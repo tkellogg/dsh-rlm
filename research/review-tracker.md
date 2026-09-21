@@ -228,7 +228,7 @@ Additional source-review finding, not yet reproduced: [checkpoint exception hand
 ### User decisions
 - Jev must be an **optional plugin**, not a core dependency. Evaluate fit before implementing.
 - Smaller recovery gate (04) approved: first execution after recovery returns notice without executing supplied source, then model reconsiders. Core safety must work with Jev absent/offline.
-- Prefer production-proven asyncio primitives/patterns over a custom demultiplexer. Plain code agents do not need an LLM notification policy.
+- Prefer production-proven asyncio primitives/patterns over a custom demultiplexer. Program agents do not need an autonomous LLM notification policy.
 - Start agreed implementation work in a Sol/high subagent while discussion continues.
 
 ### Dispatch status
@@ -252,5 +252,5 @@ Do not use Jev to decide whether an actual recovery occurred, whether an effect 
 - Dynamic task set: asyncio.wait(..., return_when=FIRST_COMPLETED), retaining pending tasks.
 - Producer/consumer events: bounded asyncio.Queue plus ordinary worker tasks; choose backpressure explicitly.
 - Scoped child lifetime: asyncio.TaskGroup when fail-fast sibling cancellation and waiting at scope exit are wanted. A TaskGroup scoped to one cell is not appropriate for workers meant to outlive that cell.
-- RLM-specific adapter only: bridge retained results to model-step boundaries, batch notifications, and decide whether idle model should wake. No replacement task/cancellation semantics; ordinary code consumers just await results/queues.
+- RLM-specific adapter only: bridge retained results to model-step boundaries, batch notifications, and decide whether idle model should wake. No replacement task/cancellation semantics; program-agent consumers just await results/queues.
 

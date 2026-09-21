@@ -46,13 +46,13 @@ class Runtime(Generic[M]):
     processes: "Processes"
     recovery: "RecoveryReport | None"
 
-    async def spawn(
+    async def spawn_program(
         self,
         entry: Callable[["Runtime[Any]"], Awaitable[T]],
         *,
         name: str | None = None,
         mailbox: "MailboxConfig | None" = None,
-    ) -> "AgentHandle[T]": ...
+    ) -> "ProgramAgentHandle[T]": ...
 
     async def spawn_rlm(
         self, prompt: str, *, name: str | None = None, model: str | None = None,
@@ -69,7 +69,7 @@ def current_runtime() -> Runtime[Any]: ...
 def connect() -> AbstractAsyncContextManager[Runtime[Any]]: ...
 ```
 
-`spawn` starts a cooperative task in the current Python host. Pass an async
+`spawn_program` starts a program agent as a cooperative task in the current Python host. A program agent has an async function at its root and no autonomous LLM loop. Pass an async
 function, not a coroutine that has already been scheduled. Bind extra arguments
 with a closure or `functools.partial`; the runtime supplies the remaining argument.
 The child has its own identity and mailbox before the handle is returned.
@@ -85,7 +85,7 @@ manager: `async with connect() as runtime:`. It reads launcher-supplied connecti
 settings and joins the identity already assigned to that process. Exiting closes
 that connection, not the parent runtime. No automatic connection on import.
 
-## Agent handles
+## Program-agent handles
 
 ```python
 @dataclass(frozen=True)
@@ -96,7 +96,7 @@ class AgentRef:
     mailbox: "MailboxRef"
 
 @dataclass(frozen=True)
-class AgentHandle(AgentRef, Generic[T]):
+class ProgramAgentHandle(AgentRef, Generic[T]):
     task: asyncio.Task[T]
 
     async def status(self) -> "AgentStatus": ...
@@ -105,8 +105,8 @@ class AgentHandle(AgentRef, Generic[T]):
 Properties are immutable identity data. Only the creator receives a control
 handle; a child's parent reference cannot cancel the parent. `status()` asks for current state.
 States are `starting`, `running`, `idle`, `stopping`, `completed`, `failed`,
-`cancelled`, `interrupted`, or `unknown`. Only an RLM reports `idle`; ordinary
-tasks remain `running` while waiting for I/O or messages. An idle agent is alive.
+`cancelled`, `interrupted`, or `unknown`. Only an RLM reports `idle`; program
+agents remain `running` while waiting for I/O or messages. An idle agent is alive.
 A disconnected host can make status unknown; it does not prove completion or death.
 
 `await child.task` returns the entrypoint's Python result or raises its original

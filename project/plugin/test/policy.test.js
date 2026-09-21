@@ -63,6 +63,8 @@ test('RLM policy shows guidance and only execute_python to root and child RLM ag
   assert.match(RLM_CONTROLLER_PROMPT, /runtime\.tools\.list\(\)/)
   assert.match(RLM_CONTROLLER_PROMPT, /await runtime\.tools\.call/)
   assert.match(RLM_CONTROLLER_PROMPT, /await runtime\.models\.complete/)
+  assert.match(RLM_CONTROLLER_PROMPT, /await runtime\.spawn_program/)
+  assert.match(RLM_CONTROLLER_PROMPT, /program agent/)
   assert.match(RLM_CONTROLLER_PROMPT, /Do not call `execute_python` through `runtime\.tools\.call`/)
 
   for (const current of [root, child]) {
