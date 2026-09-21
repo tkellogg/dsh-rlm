@@ -1,6 +1,6 @@
 """Explicit host-capable local workers with process-live bridge leases."""
 from __future__ import annotations
-import asyncio, inspect, math, uuid, weakref
+import asyncio, contextvars, inspect, math, uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Generic, TypeVar
 
@@ -18,12 +18,18 @@ class HostWorkerLease:
     def wire(self)->dict[str,Any]:
         return {"run_id":self.run_id,"worker_id":self.worker_id,"generation":self.generation,"admission_id":self.admission_id}
 
-_TASK_LEASES: weakref.WeakKeyDictionary[asyncio.Task[Any], tuple[Any,HostWorkerLease]] = weakref.WeakKeyDictionary()
+@dataclass(frozen=True, slots=True)
+class _TaskLeaseBinding:
+    runtime: Any
+    lease: HostWorkerLease
+    task: asyncio.Task[Any]
+
+_TASK_LEASE: contextvars.ContextVar[_TaskLeaseBinding|None] = contextvars.ContextVar("dsh_rlm_host_worker_lease", default=None)
 
 def worker_lease(runtime: Any)->HostWorkerLease|None:
     task=asyncio.current_task()
-    item=_TASK_LEASES.get(task) if task is not None else None
-    return item[1] if item is not None and item[0] is runtime else None
+    binding=_TASK_LEASE.get()
+    return binding.lease if binding is not None and binding.runtime is runtime and binding.task is task else None
 
 @dataclass(frozen=True, slots=True)
 class HostWorkerHandle(Generic[T]):
@@ -87,14 +93,14 @@ class HostWorkers:
         started=asyncio.Event()
         async def run()->T:
             task=asyncio.current_task(); assert task is not None
-            _TASK_LEASES[task]=(task_runtime,lease); started.set()
+            token=_TASK_LEASE.set(_TaskLeaseBinding(task_runtime,lease,task)); started.set()
             try:
                 value=entry(task_runtime)
                 if not inspect.isawaitable(value): raise TypeError("entry must return an awaitable")
                 if timeout is None: return await value
                 async with asyncio.timeout(float(timeout)): return await value
             finally:
-                _TASK_LEASES.pop(task,None); await cleanup()
+                _TASK_LEASE.reset(token); await cleanup()
         try:
             task=asyncio.create_task(run(),name=name)
         except BaseException:
