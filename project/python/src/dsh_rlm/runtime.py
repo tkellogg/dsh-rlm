@@ -67,6 +67,7 @@ class _HostCallbackScope:
     parent_id: str
     callback: _HostCallback
     driver_mailbox_id: str
+    owner_task: asyncio.Task[Any]
     active: bool = True
     calls: int = 0
 
@@ -360,6 +361,7 @@ class Runtime(Generic[M]):
             and scope is not None
             and scope.active
             and scope.state is self._state
+            and asyncio.current_task() is scope.owner_task
         ):
             child._host_worker_transport = self._host_worker_transport
             try:
@@ -503,8 +505,11 @@ class Runtime(Generic[M]):
         self, parent_id: str, callback: _HostCallback
     ) -> AsyncIterator[None]:
         """Enable bridge callbacks for this cell and its task descendants."""
+        owner_task = asyncio.current_task()
+        if owner_task is None:
+            raise RuntimeError("host callback scope requires an asyncio task")
         scope = _HostCallbackScope(
-            self._state, parent_id, callback, self.mailbox.id
+            self._state, parent_id, callback, self.mailbox.id, owner_task
         )
         token = _HOST_CALLBACK_SCOPE.set(scope)
         try:

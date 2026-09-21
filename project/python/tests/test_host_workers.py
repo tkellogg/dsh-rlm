@@ -81,6 +81,32 @@ async def test_program_agent_automatically_keeps_exact_task_host_authority():
 
 
 @pytest.mark.asyncio
+async def test_raw_descendant_cannot_admit_host_capable_program_agent():
+    root = Runtime(rlm=True)
+    transport = FakeTransport()
+    root._host_worker_transport = transport
+    ran = asyncio.Event()
+
+    async def entry(_child):
+        ran.set()
+
+    async def callback(*_args):
+        return None
+
+    async with root.bind():
+        async with root._bind_host_callbacks("creating-cell", callback):
+            descendant = asyncio.create_task(root.spawn_program(entry))
+            handle = await descendant
+            # The inherited task may still create a local program agent, but it
+            # cannot amplify the cell authority into a worker admission.
+            await handle.wait()
+
+    assert ran.is_set()
+    assert transport.calls == []
+    await root.close()
+
+
+@pytest.mark.asyncio
 async def test_admission_requires_active_cell():
     rt=Runtime(rlm=True); rt._host_worker_transport=FakeTransport()
     async def entry(_): return 1
@@ -114,8 +140,9 @@ async def test_withheld_admission_cancel_retires(monkeypatch):
  async def cb(*args): pass
  async with rt.bind():
   async with rt._bind_host_callbacks("cell",cb):
-   pending=asyncio.create_task(rt.host_workers.spawn(entry)); await asyncio.sleep(0); pending.cancel()
-   with pytest.raises(asyncio.CancelledError): await pending
+   owner=asyncio.current_task(); assert owner is not None
+   asyncio.get_running_loop().call_soon(owner.cancel)
+   with pytest.raises(asyncio.CancelledError): await rt.host_workers.spawn(entry)
  assert tx.retired==["worker admission outcome unknown"] and not rt._host_worker_cleanup_tasks
 
 @pytest.mark.asyncio

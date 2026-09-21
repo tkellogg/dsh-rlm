@@ -69,7 +69,7 @@ class HostWorkers:
         if transport is None: raise HostWorkerError("WORKERS_UNAVAILABLE","host workers are not attached")
         from .runtime import _HOST_CALLBACK_SCOPE, _CURRENT_RUNTIME
         scope=_HOST_CALLBACK_SCOPE.get(); current=asyncio.current_task()
-        if not runtime.authoritative or not runtime._rlm or _CURRENT_RUNTIME.get() is not runtime or scope is None or not scope.active or scope.state is not runtime._state or current is None: raise HostWorkerError("ADMISSION_DENIED","worker admission requires an active execute cell")
+        if not runtime.authoritative or not runtime._rlm or _CURRENT_RUNTIME.get() is not runtime or scope is None or not scope.active or scope.state is not runtime._state or current is None or current is not scope.owner_task: raise HostWorkerError("ADMISSION_DENIED","worker admission requires the exact active execute-cell task")
         worker_id="worker-"+uuid.uuid4().hex
         admission=asyncio.create_task(transport.admit(scope.parent_id,runtime.agent_id,worker_id,None if timeout is None else max(1,int(timeout*1000))))
         runtime._host_worker_cleanup_tasks.add(admission)
