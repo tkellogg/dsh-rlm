@@ -4,10 +4,17 @@ This package is a Cordis bundle for DeepSeek Harness. It adds a selectable Agent
 Preset named **RLM Mode** and makes it the deployment default. The preset is a
 pinned copy of DSH's Standard preset plus the RLM bridge and controller policy.
 
-For a live root agent, the model sees only `execute_python`. Python can enumerate
-and invoke the normal DSH tools and can make auxiliary model calls. Spawned child agents keep the normal Standard prompt and tool catalog. The RLM
-root cannot call `subagent_fork`, so its committed controller prompt cannot be
-copied into a fork; ordinary children retain the Standard fork tool.
+For each live agent composed with the RLM preset, including inherited RLM child
+agents, the model sees only `execute_python`. Each agent owns an isolated Python
+bridge. Python can enumerate and invoke guarded DSH tools and make auxiliary
+model calls. Standard-mode agents retain their normal prompt and tool catalogue.
+RLM callbacks deny `execute_python` and `subagent_fork` to prevent recursive
+controller entry; model selection and reasoning effort remain independent of mode.
+
+See the [runtime cookbook](../../docs/rlm-runtime-cookbook.md) for compact discovery,
+state/task inspection, truthful driver delivery, and explicitly admitted
+post-cell host workers. Source edits require rebuilding/reloading the affected
+host and Python implementation; they do not deploy themselves.
 
 ## Requirements
 

@@ -74,6 +74,12 @@ class CheckpointReport:
 
     saved: tuple[str, ...] = ()
     skipped: tuple[ValueIssue, ...] = ()
+    # Populated by LocalKernel relative to the preceding successful checkpoint.
+    # ``skipped`` remains the complete queryable inventory.
+    newly_skipped: tuple[ValueIssue, ...] = ()
+    # A newly observed save failure for automatic reporting; ``error`` remains
+    # the complete current status even after an identical failure is reported.
+    notice_error: str | None = None
     byte_count: int = 0
     checkpoint_id: str = ""
     created_at: str = ""
@@ -301,11 +307,13 @@ def _contains_live_resource(value: Any) -> bool:
     return False
 
 
-def _is_excluded(value: Any) -> bool:
-    """Whether *value* can embed live runtime state in a checkpoint."""
+def _exclusion_reason(value: Any) -> str | None:
+    """Describe why *value* cannot be recovered, if it cannot be."""
     if isinstance(value, types.ModuleType):
-        return True
-    return _contains_live_resource(value)
+        return "imported module is not recoverable"
+    if _contains_live_resource(value):
+        return "runtime value is not recoverable"
+    return None
 
 
 def _issue(name: Any, reason: str) -> ValueIssue:
@@ -412,14 +420,14 @@ class CheckpointStore:
                 skipped.append(_issue(name, f"read failed: {_safe_reason(error)}"))
                 continue
             try:
-                excluded = _is_excluded(value)
+                exclusion_reason = _exclusion_reason(value)
             except BaseException as error:
                 skipped.append(
                     _issue(name, f"resource inspection failed: {_safe_reason(error)}")
                 )
                 continue
-            if excluded:
-                skipped.append(_issue(name, "runtime value is not recoverable"))
+            if exclusion_reason is not None:
+                skipped.append(_issue(name, exclusion_reason))
                 continue
 
             output = io.BytesIO()
@@ -561,14 +569,14 @@ class CheckpointStore:
                 )
                 continue
             try:
-                excluded = _is_excluded(value)
+                exclusion_reason = _exclusion_reason(value)
             except BaseException as error:
                 failed.append(
                     _issue(name, f"resource inspection failed: {_safe_reason(error)}")
                 )
                 continue
-            if excluded:
-                skipped.append(_issue(name, "runtime value is not recoverable"))
+            if exclusion_reason is not None:
+                skipped.append(_issue(name, exclusion_reason))
                 continue
             staged[name] = value
 

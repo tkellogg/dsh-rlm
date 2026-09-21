@@ -165,9 +165,14 @@ def test_abrupt_exit_restores_checkpoint_and_reports_once(tmp_path: Path) -> Non
     restarted = _start(session_dir)
     recovered = _send(
         restarted,
-        {"id": "recover", "method": "execute", "source": "durable"},
+        {
+            "id": "recover",
+            "method": "execute",
+            "source": "should_not_run = True\ndurable",
+        },
     )
-    assert recovered["result"]["cell"]["display"] == "42"
+    assert recovered["result"]["cell"]["display"] is None
+    assert recovered["result"]["checkpoint"] is None
     notice = recovered["result"]["recovery_notice"]
     assert notice is not None
     assert "Previous run was interrupted" in notice
@@ -175,7 +180,12 @@ def test_abrupt_exit_restores_checkpoint_and_reports_once(tmp_path: Path) -> Non
 
     next_response = _send(
         restarted,
-        {"id": "once", "method": "execute", "source": "durable + 1"},
+        {
+            "id": "once",
+            "method": "execute",
+            "source": "('should_not_run' in globals(), durable + 1)",
+        },
     )
+    assert next_response["result"]["cell"]["display"] == "(False, 43)"
     assert next_response["result"]["recovery_notice"] is None
     assert _close(restarted)["ok"] is True

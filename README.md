@@ -8,10 +8,10 @@ The working system provides:
 - a root controller whose only model-visible tool is `execute_python`;
 - a persistent CPython namespace with top-level `await`;
 - host-backed `runtime.tools` and `runtime.models` calls from Python;
-- ordinary DSH child agents with the standard tool surface;
+- RLM children that inherit the persistent Python control plane, while Standard parents keep Standard children;
 - native `asyncio` tasks and bounded local mailboxes;
 - best-effort checkpoints with mandatory interruption notices; and
-- one managed Python process per live root DSH agent.
+- one managed Python process per live RLM agent.
 
 DSH remains responsible for provider routing, permissions, approvals, sessions,
 tool execution, subprocess lifecycle, and the outer agent loop. The RLM plugin
@@ -27,4 +27,5 @@ through those host services.
 The integration target is DeepSeek Harness `0.1.6-alpha.2` at commit
 `ddefc45fbc7f8e46dd73185e68295696d1297887`.
 See [project/plugin/README.md](project/plugin/README.md) for build, install, and
-startup instructions.
+startup instructions. For bounded inspection, task visibility, and active-cell delivery
+recipes, see the [RLM runtime cookbook](docs/rlm-runtime-cookbook.md).

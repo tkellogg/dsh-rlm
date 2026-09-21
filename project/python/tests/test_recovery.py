@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -366,6 +367,49 @@ async def test_failed_post_cell_checkpoint_is_reported_after_crash(
     await resumed.close()
 
 
+@pytest.mark.asyncio
+async def test_checkpoint_reports_only_new_meaningful_exclusions(tmp_path: Path) -> None:
+    kernel = LocalKernel(tmp_path)
+    first = await kernel.execute("import math")
+    assert first.ok
+    report = kernel.last_checkpoint
+    assert report is not None
+    assert any(issue.name == "runtime" for issue in report.skipped)
+    assert any(issue.name == "math" for issue in report.skipped)
+    # Routine runtime/import exclusions stay queryable but are not transitions.
+    assert not report.newly_skipped
+
+    second = await kernel.execute("handle = runtime.mailbox")
+    assert second.ok
+    report = kernel.last_checkpoint
+    assert report is not None
+    assert [issue.name for issue in report.newly_skipped] == ["handle"]
+    assert any(issue.name == "handle" for issue in report.skipped)
+
+    third = await kernel.execute("handle = None\n1 + 1")
+    assert third.ok
+    assert kernel.last_checkpoint is not None
+    assert not kernel.last_checkpoint.newly_skipped
+    fourth = await kernel.execute("handle = runtime.mailbox")
+    assert fourth.ok
+    assert kernel.last_checkpoint is not None
+    assert [issue.name for issue in kernel.last_checkpoint.newly_skipped] == ["handle"]
+
+    def fail_save(namespace: object) -> CheckpointReport:
+        return CheckpointReport(error="disk unavailable")
+
+    kernel.checkpoint_store.save = fail_save  # type: ignore[method-assign]
+    assert (await kernel.execute("2 + 2")).ok
+    assert kernel.last_checkpoint is not None
+    assert kernel.last_checkpoint.error == "disk unavailable"
+    assert kernel.last_checkpoint.notice_error == "disk unavailable"
+    assert (await kernel.execute("3 + 3")).ok
+    assert kernel.last_checkpoint is not None
+    assert kernel.last_checkpoint.error == "disk unavailable"
+    assert kernel.last_checkpoint.notice_error is None
+    await kernel.close()
+
+
 def test_recovery_notice_is_bounded_and_keeps_safety_warning() -> None:
     issues = tuple(ValueIssue(f"name-{n}", "x" * 10_000) for n in range(100))
     report = RecoveryReport(
@@ -381,6 +425,61 @@ def test_recovery_notice_is_bounded_and_keeps_safety_warning() -> None:
     assert len(notice) <= 8_192
     assert "Prior tasks, mailboxes, and handles are invalid" in notice
     assert notice.endswith("</runtime_recovery>")
+
+
+@pytest.mark.asyncio
+async def test_close_during_checkpoint_cancels_and_cannot_publish_after_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = LocalKernel(tmp_path)
+    assert (await kernel.execute("value = 'good'")).ok
+    good_bytes = (tmp_path / "checkpoint").read_bytes()
+    started = tmp_path / "checkpoint-started"
+
+    def delayed_save(namespace: object) -> CheckpointReport:
+        started.write_text("started")
+        while True:
+            pass
+
+    kernel.checkpoint_store.save = delayed_save  # type: ignore[method-assign]
+    execution = asyncio.create_task(kernel.execute("value = 'late'"))
+    async with asyncio.timeout(2):
+        while not started.exists():
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(kernel.close(), 2)
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    assert (tmp_path / "checkpoint").read_bytes() == good_bytes
+    assert not list(tmp_path.glob(".checkpoint-generation.*"))
+    assert not list(tmp_path.glob(".checkpoint-report.*"))
+
+    resumed = LocalKernel(tmp_path)
+    assert resumed.repl.globals["value"] == "good"
+    await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_timeout_kills_sigterm_resistant_worker_and_keeps_snapshot(
+    tmp_path: Path,
+) -> None:
+    kernel = LocalKernel(tmp_path, checkpoint_timeout=0.05)
+    assert (await kernel.execute("value = 'good'")).ok
+    good_bytes = (tmp_path / "checkpoint").read_bytes()
+
+    def ignores_sigterm(namespace: object) -> CheckpointReport:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            pass
+
+    kernel.checkpoint_store.save = ignores_sigterm  # type: ignore[method-assign]
+    result = await asyncio.wait_for(kernel.execute("value = 'live-only'"), 2)
+    assert result.ok
+    assert kernel.last_checkpoint is not None
+    assert "exceeded" in (kernel.last_checkpoint.error or "")
+    assert (tmp_path / "checkpoint").read_bytes() == good_bytes
+    await asyncio.wait_for(kernel.close(), 2)
+    assert not list(tmp_path.glob(".checkpoint-generation.*"))
+    assert not list(tmp_path.glob(".checkpoint-report.*"))
 
 
 @pytest.mark.asyncio

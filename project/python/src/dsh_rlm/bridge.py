@@ -20,12 +20,15 @@ from typing import Any, BinaryIO, Callable, TextIO
 
 from .checkpoint import CheckpointReport, ValueIssue
 from .kernel import LocalKernel
+from .host_workers import HostWorkerError, HostWorkerLease
 from .repl import CellResult
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_BYTES = 1024 * 1024
 MAX_CALLBACK_BYTES = 1024 * 1024
 MAX_ID_CHARS = 1024
+MAX_WORKER_INFLIGHT = 32
+MAX_WORKER_TOMBSTONES = 256
 MAX_CALLBACKS_PER_EXECUTE = 64
 MAX_CALLBACKS_INFLIGHT = 32
 MAX_PENDING_REQUESTS = 1024
@@ -34,7 +37,9 @@ _MAX_CHECKPOINT_ITEMS = 128
 _MAX_CHECKPOINT_TEXT_CHARS = 512
 _MAX_PROTOCOL_TEXT_CHARS = 65_536
 _CALLBACK_CAPABILITY = "host-callback-v1"
-_CALLBACK_METHODS = frozenset(("tools.list", "tools.call", "models.complete"))
+_CALLBACK_METHODS = frozenset(
+    ("tools.list", "tools.call", "models.complete", "mailbox.delivery")
+)
 _EOF = object()
 _MAX_SAFE_INTEGER = (1 << 53) - 1
 _FORCED_EXIT_CODE = 70
@@ -162,6 +167,16 @@ def _checkpoint_summary(report: CheckpointReport | None) -> dict[str, Any] | Non
         skipped.append(
             {"name": "...", "reason": f"{len(report.skipped) - len(skipped)} omitted"}
         )
+    newly_skipped = [
+        _issue_summary(issue) for issue in report.newly_skipped[:_MAX_CHECKPOINT_ITEMS]
+    ]
+    if len(report.newly_skipped) > len(newly_skipped):
+        newly_skipped.append(
+            {
+                "name": "...",
+                "reason": f"{len(report.newly_skipped) - len(newly_skipped)} omitted",
+            }
+        )
     return {
         "ok": report.ok,
         "checkpoint_id": report.checkpoint_id,
@@ -169,6 +184,12 @@ def _checkpoint_summary(report: CheckpointReport | None) -> dict[str, Any] | Non
         "byte_count": report.byte_count,
         "saved": saved,
         "skipped": skipped,
+        "newly_skipped": newly_skipped,
+        "notice_error": (
+            _truncate(report.notice_error, _MAX_CHECKPOINT_TEXT_CHARS)
+            if report.notice_error is not None
+            else None
+        ),
         "error": (
             _truncate(report.error, _MAX_CHECKPOINT_TEXT_CHARS)
             if report.error is not None
@@ -346,6 +367,8 @@ class _ProtocolConnection:
             maxsize=MAX_PENDING_REQUESTS
         )
         self.pending: dict[str, asyncio.Future[Any]] = {}
+        self.worker_pending: dict[str, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
+        self.worker_retired: list[str] = []
         self.closed = asyncio.Event()
         self.input_eof = asyncio.Event()
         self.reader_done = asyncio.Event()
@@ -381,8 +404,9 @@ class _ProtocolConnection:
             self.output_stream.flush()
 
     def _fail_all(self, error: HostCallbackError) -> None:
-        pending = tuple(self.pending.values())
+        pending = tuple(self.pending.values()) + tuple(f for _, f in self.worker_pending.values())
         self.pending.clear()
+        self.worker_pending.clear()
         for future in pending:
             if not future.done():
                 future.set_exception(error)
@@ -528,7 +552,7 @@ class _ProtocolConnection:
                 line, oversized = await self._next_line()
                 if not line and not oversized:
                     self.input_eof.set()
-                    if self.pending:
+                    if self.pending or self.worker_pending:
                         self._poison(
                             "CALLBACK_TRANSPORT_CLOSED",
                             "bridge input reached EOF while a callback was pending",
@@ -556,6 +580,17 @@ class _ProtocolConnection:
                     if not self._queue_request(_Inbound(line)):
                         return
                     continue
+                if isinstance(value, dict) and value.get("kind") in {"worker_admit_result", "worker_result", "worker_cancel_result", "worker_release_result"}:
+                    raw_id=value.get("id"); item=self.worker_pending.get(raw_id) if type(raw_id) is str else None
+                    if item is None:
+                        if raw_id in self.worker_retired: continue
+                        self._poison("UNKNOWN_WORKER_RESULT", "unknown worker result id"); return
+                    expected_kind, future=item
+                    if value.get("kind") != expected_kind or future.done():
+                        self.worker_pending.pop(raw_id, None)
+                        if not future.done(): future.set_exception(HostWorkerError("INVALID_WORKER_RESULT", "worker result kind mismatch"))
+                        self._poison("INVALID_WORKER_RESULT", "worker result kind mismatch"); return
+                    self.worker_pending.pop(raw_id, None); future.set_result(value); continue
                 if isinstance(value, dict) and value.get("kind") == "callback_result":
                     payload_size = len(line[:-1] if line.endswith(b"\n") else line)
                     if payload_size > MAX_CALLBACK_BYTES:
@@ -633,6 +668,82 @@ class _ProtocolConnection:
             await task
         except asyncio.CancelledError:
             pass
+
+
+class _WorkerTransport:
+    """Process-live worker multiplexing over the sole protocol connection."""
+    def __init__(self, connection: _ProtocolConnection, run_id: str, outcomes: list[dict[str, Any]]) -> None:
+        self.connection=connection; self.run_id=run_id; self.closed=False; self._cleanup_tasks: set[asyncio.Task[Any]] = set(); self.outcomes=outcomes
+    async def _request(self, frame: dict[str, Any], result_kind: str) -> dict[str, Any]:
+        if self.closed or self.connection.input_eof.is_set(): raise HostWorkerError("WORKER_TRANSPORT_CLOSED", "worker transport is closed")
+        if len(self.connection.worker_pending) >= MAX_WORKER_INFLIGHT: raise HostWorkerError("WORKER_INFLIGHT_LIMIT", "worker inflight limit exceeded")
+        ident=frame["id"]; future=asyncio.get_running_loop().create_future(); self.connection.worker_pending[ident]=(result_kind,future)
+        try:
+            await self.connection.write(frame, limit=MAX_CALLBACK_BYTES)
+            value=await future
+        except BaseException:
+            if self.connection.worker_pending.pop(ident,None) is not None:
+                self.connection.worker_retired.append(ident)
+                del self.connection.worker_retired[:-MAX_WORKER_TOMBSTONES]
+            raise
+        if type(value.get("ok")) is not bool: raise HostWorkerError("INVALID_WORKER_RESULT","ok must be boolean")
+        return value
+    async def admit(self,parent_id:str,run_id:str,worker_id:str,lifetime_ms:int|None)->HostWorkerLease:
+        ident="wa-"+uuid.uuid4().hex
+        v=await self._request({"kind":"worker_admit","id":ident,"parent_id":parent_id,"run_id":run_id,"worker_id":worker_id,"lifetime_ms":lifetime_ms},"worker_admit_result")
+        if not v["ok"]: raise self._error(v)
+        lease=v.get("lease")
+        if (not isinstance(lease,dict) or set(lease)!={"run_id","worker_id","generation","admission_id"}
+            or not all(self._ascii(lease.get(k)) for k in ("run_id","worker_id","admission_id"))
+            or type(lease.get("generation")) is not int or lease["generation"] < 0 or lease["generation"] > _MAX_SAFE_INTEGER):
+            raise HostWorkerError("INVALID_WORKER_RESULT","invalid lease")
+        return HostWorkerLease(**lease)
+    async def invoke(self,lease:HostWorkerLease,method:str,params:dict[str,Any],timeout_ms:int=120000)->Any:
+        ident="wi-"+uuid.uuid4().hex
+        try:
+            v=await self._request({"kind":"worker_invoke","id":ident,"lease":lease.wire(),"method":method,"params":params,"timeout_ms":timeout_ms},"worker_result")
+        except asyncio.CancelledError:
+            self.outcomes.append({"invocation_id":ident,"effect_id":None,"outcome_unknown":True,"reason":"python task cancelled"})
+            del self.outcomes[:-256]
+            cleanup=asyncio.create_task(self.cancel(lease, ident))
+            self._cleanup_tasks.add(cleanup); cleanup.add_done_callback(self._cleanup_tasks.discard)
+            raise
+        if not v["ok"]: raise self._error(v, worker=True)
+        if set(v)!={"kind","id","ok","effect_id","result"} or not self._ascii(v.get("effect_id")): raise HostWorkerError("INVALID_WORKER_RESULT","invalid worker success")
+        return v["result"]
+    async def release(self,lease:HostWorkerLease)->bool:
+        ident="wr-"+uuid.uuid4().hex; v=await self._request({"kind":"worker_release","id":ident,"lease":lease.wire()},"worker_release_result")
+        if not v["ok"]: raise self._error(v)
+        if set(v)!={"kind","id","ok","released"} or type(v.get("released")) is not bool: raise HostWorkerError("INVALID_WORKER_RESULT","invalid release result")
+        return v["released"]
+    async def cancel(self,lease:HostWorkerLease,invocation_id:str)->bool:
+        ident="wc-"+uuid.uuid4().hex; v=await self._request({"kind":"worker_cancel","id":ident,"lease":lease.wire(),"invocation_id":invocation_id},"worker_cancel_result")
+        if not v["ok"]: raise self._error(v)
+        if set(v)!={"kind","id","ok","cancelled"} or type(v.get("cancelled")) is not bool: raise HostWorkerError("INVALID_WORKER_RESULT","invalid cancel result")
+        return v["cancelled"]
+    @staticmethod
+    def _ascii(v:Any)->bool: return type(v) is str and bool(v) and len(v)<=256 and v.isascii() and v.isprintable()
+    @staticmethod
+    def _error(v:dict[str,Any],worker:bool=False)->HostWorkerError:
+        e=v.get("error") if isinstance(v.get("error"),dict) else {}
+        return HostWorkerError(str(e.get("code","INVALID_WORKER_RESULT")),str(e.get("message","invalid worker error")),effect_id=v.get("effect_id") if worker else None,outcome_unknown=e.get("outcome_unknown") is True if worker else False)
+    def retire(self, reason: str="runtime closed")->None:
+        self.close()
+        # No wire-level run-revoke exists in v1. Poisoning terminates the bridge;
+        # host EOF retirement is therefore the authoritative all-leases fence.
+        self.connection._poison("WORKER_RUN_RETIRED", reason)
+    def close(self)->None:
+        if self.closed: return
+        self.closed=True
+        for ident, (_kind, future) in tuple(self.connection.worker_pending.items()):
+            self.connection.worker_pending.pop(ident, None)
+            self.connection.worker_retired.append(ident)
+            if not future.done():
+                self.outcomes.append({"invocation_id":ident,"effect_id":None,"outcome_unknown":True,"reason":"worker transport retired"})
+                future.set_exception(HostWorkerError("WORKER_TRANSPORT_CLOSED", "worker transport closed", effect_id=None, outcome_unknown=True))
+        del self.connection.worker_retired[:-MAX_WORKER_TOMBSTONES]
+        del self.outcomes[:-256]
+        for task in tuple(self._cleanup_tasks): task.cancel()
 
 
 class _CellCallbacks:
@@ -722,6 +833,8 @@ async def serve(
     kernel = await LocalKernel.open(session_dir)
     connection = _ProtocolConnection(input_stream, output_stream)
     connection.start()
+    worker_transport = _WorkerTransport(connection, kernel._run_id, kernel.runtime._host_worker_outcomes)
+    kernel.runtime._host_worker_transport = worker_transport
 
     def interruption_cause() -> str:
         error = connection.fatal_error
@@ -778,6 +891,24 @@ async def serve(
                     )
                 return
 
+            # Opening the kernel already restored recoverable state.  Gate the
+            # first post-recovery source so the caller observes that transition
+            # before any requested Python (and therefore any external effect)
+            # can run.  The following execute may reconsider and proceed.
+            recovery_notice = kernel.take_recovery_notice()
+            if recovery_notice is not None:
+                response = {
+                    "id": request.id,
+                    "ok": True,
+                    "result": {
+                        "cell": _cell_summary(CellResult(stdout="", stderr="")),
+                        "checkpoint": None,
+                        "recovery_notice": recovery_notice,
+                    },
+                }
+                await connection.write(response)
+                continue
+
             callbacks = None
             if _CALLBACK_CAPABILITY in request.capabilities:
                 callbacks = _CellCallbacks(connection, request.id)
@@ -809,7 +940,6 @@ async def serve(
                 except asyncio.CancelledError:
                     pass
                 result = await execution
-                recovery_notice = kernel.take_recovery_notice()
                 checkpoint = _checkpoint_summary(
                     kernel.last_checkpoint if result.ok else None
                 )
@@ -837,6 +967,8 @@ async def serve(
                     closed_wait.cancel()
             await connection.write(response)
     finally:
+        worker_transport.close()
+        kernel.runtime._host_worker_transport = None
         if not kernel.closed:
             if connection.fatal_error is None:
                 await kernel.close()

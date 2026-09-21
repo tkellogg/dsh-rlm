@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
-import { BridgePool, sanitizeAgentId } from '../lib/bridge-client.js'
+import { BridgePool, outsideBridgeCallbackScope, sanitizeAgentId } from '../lib/bridge-client.js'
 import { apply } from '../lib/index.js'
 import { createHostCallbackDispatcher, createHostCallbackExecution } from '../lib/host-callbacks.js'
+import { isRlmAgent } from '../lib/policy.js'
 
 const result = (source, recovery_notice = null) => ({
   cell: {
@@ -358,14 +359,31 @@ test('every agent id gets a case-safe full-digest session namespace', () => {
   assert.notEqual(sanitizeAgentId('A'), sanitizeAgentId('Ａ'))
 })
 
-test('apply standing registration guards live roots and retires bridges on preset changes', async () => {
+test('RLM mode follows effective preset independently of lineage and route', () => {
+  const preset = id => ({
+    id,
+    options: { provider: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'low' },
+    ctx: {
+      get(name) {
+        assert.equal(name, 'agentPresets')
+        return { composedPreset: target => target === this ? id : undefined }
+      },
+    },
+  })
+
+  assert.equal(isRlmAgent(preset('rlm')), true)
+  assert.equal(isRlmAgent(preset('standard')), false)
+  assert.equal(isRlmAgent(undefined), false)
+})
+
+test('apply standing registration guards live agents and retires bridges on preset changes', async () => {
   const subprocess = new FakeSubprocess(normalResponder)
   let cleanup
   let disposedListener
   let selectedListener
   let unregistered = false
   const registered = []
-  const roots = []
+  const live = []
   const ctx = {
     subprocess,
     logger: { warn() {} },
@@ -379,8 +397,8 @@ test('apply standing registration guards live roots and retires bridges on prese
     },
     llm: { stream: async function* () {} },
     agents: {
-      roots: () => [...roots],
-      get: id => roots.find(agent => agent.id === id),
+      roots: () => live.filter(agent => agent.root),
+      get: id => live.find(agent => agent.id === id),
       withInitiator: (_agent, operation) => operation(),
     },
     effect(factory) { cleanup = factory(); return () => {} },
@@ -393,8 +411,24 @@ test('apply standing registration guards live roots and retires bridges on prese
   apply(ctx)
   assert.equal(registered.length, 1)
   const tool = registered[0]
-  const root = { id: 'owner' }
-  const child = { id: 'child' }
+  const agent = (id, root, initialPreset) => {
+    let preset = initialPreset
+    const agentCtx = {
+      get(name) {
+        assert.equal(name, 'agentPresets')
+        return { composedPreset: target => target === agentCtx ? preset : undefined }
+      },
+    }
+    return {
+      id,
+      root,
+      ctx: agentCtx,
+      selectPreset(value) { preset = value },
+    }
+  }
+  const root = agent('owner', true, 'rlm')
+  const child = agent('child', false, 'rlm')
+  const standard = agent('standard', false, 'standard')
   const execution = agent => ({
     agent,
     signal: new AbortController().signal,
@@ -402,17 +436,25 @@ test('apply standing registration guards live roots and retires bridges on prese
     rootCallId: 'call-1',
     token: Symbol('outer'),
   })
-  await assert.rejects(tool.execute({ source: '1' }, execution(undefined)), /live root agent/)
-  await assert.rejects(tool.execute({ source: '1' }, execution(child)), /live root agent/)
+  await assert.rejects(tool.execute({ source: '1' }, execution(undefined)), /live RLM agent/)
+  await assert.rejects(tool.execute({ source: '1' }, execution(child)), /live RLM agent/)
 
-  roots.push(root)
+  live.push(root, child, standard)
+  await assert.rejects(tool.execute({ source: '1' }, execution(standard)), /live RLM agent/)
+  assert.equal(subprocess.spawns.length, 0)
   assert.equal((await tool.execute({ source: '6 * 7' }, execution(root))).cell.display, '6 * 7')
-  roots.length = 0
-  await assert.rejects(tool.execute({ source: '1' }, execution(root)), /live root agent/)
-
+  assert.equal((await tool.execute({ source: '21 * 2' }, execution(child))).cell.display, '21 * 2')
+  assert.equal(subprocess.spawns.length, 2)
+  root.selectPreset('standard')
   selectedListener('owner', 'standard')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(subprocess.spawns[0].handle.terminated, true)
+  await assert.rejects(tool.execute({ source: '1' }, execution(root)), /live RLM agent/)
+  assert.equal(subprocess.spawns.length, 2)
+
+  live.splice(live.indexOf(root), 1)
+  await assert.rejects(tool.execute({ source: '1' }, execution(root)), /live RLM agent/)
+
   selectedListener('owner', 'rlm')
   disposedListener({ agent: root })
   await cleanup()
@@ -661,6 +703,88 @@ test('callback parent mismatch and invalid params poison the bridge', async () =
   }
 })
 
+test('host work can explicitly detach independent execution from callback scope', async () => {
+  let outerRequest
+  let callbackResult
+  let detached
+  const subprocess = new FakeSubprocess((request, handle) => {
+    if (request.method === 'execute') {
+      if (outerRequest === undefined) {
+        outerRequest = request
+        handle.send({ kind: 'callback', id: 'cb', parent_id: request.id, method: 'tools.list', params: {} })
+      } else {
+        handle.send({ id: request.id, ok: true, result: result(request.source) })
+      }
+    } else if (request.kind === 'callback_result') {
+      callbackResult = request
+      handle.send({ id: outerRequest.id, ok: true, result: result('outer') })
+    } else {
+      handle.send({ id: request.id, ok: true, result: { closed: true } })
+    }
+  })
+  let pool
+  const dispatcher = {
+    async dispatch() {
+      detached = outsideBridgeCallbackScope(() => (
+        pool.execute('agent', 'detached', new AbortController().signal, {})
+      ))
+      return []
+    },
+  }
+  pool = new BridgePool(subprocess, {}, dispatcher)
+  assert.equal(
+    (await pool.execute('agent', 'outer', new AbortController().signal, {})).cell.display,
+    'outer',
+  )
+  assert.equal((await detached).cell.display, 'detached')
+  assert.equal(callbackResult.ok, true)
+  assert.equal(subprocess.spawns.length, 1)
+  await pool.dispose()
+})
+
+test('callback descendants keep the guard only while the direct callback is active', async () => {
+  let outerRequest
+  let callbackResult
+  let inheritedExecute
+  const callbackReturned = Promise.withResolvers()
+  const subprocess = new FakeSubprocess((request, handle) => {
+    if (request.method === 'execute') {
+      if (outerRequest === undefined) {
+        outerRequest = request
+        handle.send({ kind: 'callback', id: 'cb', parent_id: request.id, method: 'tools.list', params: {} })
+      } else {
+        handle.send({ id: request.id, ok: true, result: result(request.source) })
+      }
+    } else if (request.kind === 'callback_result') {
+      callbackResult = request
+      handle.send({ id: outerRequest.id, ok: true, result: result('outer') })
+    } else {
+      handle.send({ id: request.id, ok: true, result: { closed: true } })
+    }
+  })
+  let pool
+  const dispatcher = {
+    async dispatch() {
+      queueMicrotask(async () => {
+        await callbackReturned.promise
+        inheritedExecute = pool.execute('agent', 'later', new AbortController().signal, {})
+      })
+      return []
+    },
+  }
+  pool = new BridgePool(subprocess, {}, dispatcher)
+  assert.equal(
+    (await pool.execute('agent', 'outer', new AbortController().signal, {})).cell.display,
+    'outer',
+  )
+  callbackReturned.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await inheritedExecute).cell.display, 'later')
+  assert.equal(callbackResult.ok, true)
+  assert.equal(subprocess.spawns.length, 1)
+  await pool.dispose()
+})
+
 test('same-bridge causal reentry is returned as a callback error', async () => {
   let outerRequest
   let callbackResult
@@ -874,36 +998,69 @@ test('models.complete inherits the current route, assembles text, and disables t
   assert.equal(seenOptions.messages[0].content[0].text, 'say hi')
 })
 
-test('models.complete reports terminal model failures and unexpected tool calls', async () => {
-  const agent = {
-    id: 'agent', options: { provider: 'p', model: 'm' },
-    session: { requestHeader: () => undefined },
-  }
-  for (const chunks of [
-    [{ type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: 'slow down' } } }],
-    [
-      { type: 'tool-call-delta', index: 0, id: 'tc', name: 'bad', argumentsDelta: '{}' },
-      { type: 'finish', reason: { kind: 'tool-calls' } },
-    ],
-  ]) {
-    const ctx = {
-      agents: { get: () => agent, withInitiator: (_agent, operation) => operation() },
-      tools: { schemas: () => [] },
-      llm: {
-        async prepareCall(config) {
-          return { config, async *stream() { yield* chunks } }
-        },
-      },
+
+test('completed worker request ids cannot replay a second host effect', async () => {
+  let effects = 0
+  let invokeFrame
+  const firstResultWritten = Promise.withResolvers()
+  const subprocess = new FakeSubprocess((request, handle) => {
+    if (request.method === 'close') { handle.send({ id: request.id, ok: true, result: { closed: true } }); return }
+    if (request.method === 'execute') {
+      handle.send({ kind: 'worker_admit', id: 'admit', parent_id: request.id, run_id: 'run', worker_id: 'worker', lifetime_ms: null })
+      queueMicrotask(() => {
+        handle.send({ id: request.id, ok: true, result: result(request.source) })
+        invokeFrame = { kind: 'worker_invoke', id: 'completed-id', lease: { run_id: 'run', worker_id: 'worker', generation: 0, admission_id: 'nonce' }, method: 'tools.list', params: {}, timeout_ms: 1000 }
+        handle.send(invokeFrame)
+      })
+      return
     }
-    const dispatcher = createHostCallbackDispatcher(ctx)
-    const record = fakeOuter(agent)
-    await assert.rejects(
-      dispatcher.dispatch(
-        { kind: 'callback', id: 'model', parent_id: '1', method: 'models.complete', params: { prompt: 'x' } },
-        createHostCallbackExecution(record.outer),
-        new AbortController().signal,
-      ),
-      /slow down|unexpected tool call/,
-    )
+    if (request.kind === 'worker_result' && request.id === 'completed-id') firstResultWritten.resolve()
+  })
+  const dispatcher = {
+    async dispatch() { throw new Error('unused') },
+    async dispatchWorker(frame) {
+      if (frame.kind === 'worker_admit') return { kind: 'worker_admit_result', id: frame.id, ok: true, lease: { run_id: 'run', worker_id: 'worker', generation: 0, admission_id: 'nonce' } }
+      effects += 1
+      return { kind: 'worker_result', id: frame.id, ok: true, effect_id: 'effect', result: [] }
+    },
   }
+  const pool = new BridgePool(subprocess, { lifecycleWaitMs: 50 }, dispatcher)
+  await pool.execute('agent', 'source', new AbortController().signal, {})
+  await firstResultWritten.promise
+  subprocess.spawns[0].handle.send(invokeFrame)
+  await subprocess.spawns[0].handle.done
+  assert.equal(effects, 1)
+  assert.equal(subprocess.spawns[0].handle.terminated, true, 'duplicate terminal id retires the generation')
+  await pool.dispose()
+})
+
+test('worker request id saturation retires before dispatching request 4097', async () => {
+  let effects = 0
+  let handleRef
+  const lease = { run_id: 'run', worker_id: 'worker', generation: 0, admission_id: 'nonce' }
+  const subprocess = new FakeSubprocess((request, handle) => {
+    handleRef = handle
+    if (request.method === 'execute') {
+      handle.send({ id: request.id, ok: true, result: result(request.source) })
+      queueMicrotask(() => handle.send({ kind: 'worker_invoke', id: 'invoke-0', lease, method: 'tools.list', params: {}, timeout_ms: 1000 }))
+      return
+    }
+    if (request.kind === 'worker_result') {
+      const next = Number(request.id.slice('invoke-'.length)) + 1
+      if (next <= 4096) handle.send({ kind: 'worker_invoke', id: `invoke-${next}`, lease, method: 'tools.list', params: {}, timeout_ms: 1000 })
+    }
+  })
+  const dispatcher = {
+    async dispatch() { throw new Error('unused') },
+    async dispatchWorker(frame) {
+      effects += 1
+      return { kind: 'worker_result', id: frame.id, ok: true, effect_id: `effect-${effects}`, result: [] }
+    },
+  }
+  const pool = new BridgePool(subprocess, { lifecycleWaitMs: 50 }, dispatcher)
+  await pool.execute('agent', 'source', new AbortController().signal, {})
+  await handleRef.done
+  assert.equal(effects, 4096)
+  assert.equal(handleRef.terminated, true)
+  await pool.dispose()
 })

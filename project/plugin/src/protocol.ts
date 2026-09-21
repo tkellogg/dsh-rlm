@@ -27,7 +27,12 @@ export interface CheckpointResult {
   created_at: string
   byte_count: number
   saved: string[]
+  /** Complete inspection inventory for this checkpoint. */
   skipped: ValueIssue[]
+  /** Meaningful exclusions not previously reported in this live kernel. */
+  newly_skipped: ValueIssue[]
+  /** Newly observed save failure; identical repeats remain in error but stay quiet. */
+  notice_error: string | null
   error: string | null
 }
 
@@ -68,7 +73,15 @@ interface FailureResponse {
 
 export type BridgeResponse = SuccessResponse | FailureResponse
 
-export type CallbackMethod = 'tools.list' | 'tools.call' | 'models.complete'
+export interface WorkerLeaseWire { run_id: string; worker_id: string; generation: number; admission_id: string }
+export type WorkerMethod = 'tools.list' | 'tools.call' | 'models.complete'
+export interface WorkerAdmitRequest { kind: 'worker_admit'; id: string; parent_id: string; run_id: string; worker_id: string; lifetime_ms: number | null }
+export interface WorkerInvokeRequest { kind: 'worker_invoke'; id: string; lease: WorkerLeaseWire; method: WorkerMethod; params: Record<string, unknown>; timeout_ms: number }
+export interface WorkerReleaseRequest { kind: 'worker_release'; id: string; lease: WorkerLeaseWire }
+export interface WorkerCancelRequest { kind: 'worker_cancel'; id: string; lease: WorkerLeaseWire; invocation_id: string }
+export type WorkerRequest = WorkerAdmitRequest | WorkerInvokeRequest | WorkerReleaseRequest | WorkerCancelRequest
+
+export type CallbackMethod = 'tools.list' | 'tools.call' | 'models.complete' | 'mailbox.delivery'
 
 export interface CallbackRequest {
   kind: 'callback'
@@ -96,7 +109,7 @@ export interface CallbackFailure {
 }
 
 export type CallbackResult = CallbackSuccess | CallbackFailure
-export type BridgeFrame = BridgeResponse | CallbackRequest
+export type BridgeFrame = BridgeResponse | CallbackRequest | WorkerRequest
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -144,6 +157,9 @@ function isCheckpointResult(value: unknown): value is CheckpointResult {
     && value.saved.every(item => typeof item === 'string')
     && Array.isArray(value.skipped)
     && value.skipped.every(isValueIssue)
+    && Array.isArray(value.newly_skipped)
+    && value.newly_skipped.every(isValueIssue)
+    && isNullableString(value.notice_error)
     && isNullableString(value.error)
 }
 
@@ -183,6 +199,18 @@ function validateCallbackParams(method: CallbackMethod, params: Record<string, u
     }
     return
   }
+  if (method === 'mailbox.delivery') {
+    if (!hasExactKeys(params, ['body', 'mode', 'mailbox_id', 'capacity'])
+      || !isJsonValue(params.body)
+      || (params.mode !== 'steer' && params.mode !== 'followup' && params.mode !== 'inject')
+      || typeof params.mailbox_id !== 'string' || params.mailbox_id.length === 0
+      || params.mailbox_id.length > MAX_CALLBACK_ID_CHARS
+      || !Number.isSafeInteger(params.capacity) || (params.capacity as number) <= 0
+      || (params.capacity as number) > 1_000_000) {
+      throw new Error('Python bridge emitted invalid mailbox.delivery callback params')
+    }
+    return
+  }
   const allowed = ['prompt', 'system', 'provider', 'model', 'reasoning_effort', 'max_tokens']
   if (!Object.keys(params).every(key => allowed.includes(key))
     || typeof params.prompt !== 'string'
@@ -198,12 +226,43 @@ function validateCallbackParams(method: CallbackMethod, params: Record<string, u
   }
 }
 
+function isWorkerId(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && value.length <= 256 && /^[\x20-\x7e]+$/.test(value) }
+function isDeadline(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= 120_000 }
+function isWorkerLease(value: unknown): value is WorkerLeaseWire {
+  return isRecord(value) && hasExactKeys(value, ['run_id', 'worker_id', 'generation', 'admission_id'])
+    && isWorkerId(value.run_id) && isWorkerId(value.worker_id) && Number.isSafeInteger(value.generation)
+    && (value.generation as number) >= 0 && isWorkerId(value.admission_id)
+}
+
 export function parseBridgeFrame(line: string): BridgeFrame {
   const value = parseJsonLine(line)
+  if (isRecord(value) && value.kind === 'worker_admit') {
+    if (!hasExactKeys(value, ['kind', 'id', 'parent_id', 'run_id', 'worker_id', 'lifetime_ms'])
+      || !isWorkerId(value.id) || !isWorkerId(value.parent_id) || !isWorkerId(value.run_id) || !isWorkerId(value.worker_id)
+      || (value.lifetime_ms !== null && !isDeadline(value.lifetime_ms))) throw new Error('Python bridge emitted an invalid worker admission')
+    return { kind: 'worker_admit', id: value.id, parent_id: value.parent_id, run_id: value.run_id, worker_id: value.worker_id, lifetime_ms: value.lifetime_ms }
+  }
+  if (isRecord(value) && value.kind === 'worker_invoke') {
+    if (!hasExactKeys(value, ['kind', 'id', 'lease', 'method', 'params', 'timeout_ms'])
+      || !isWorkerId(value.id) || !isWorkerLease(value.lease)
+      || (value.method !== 'tools.list' && value.method !== 'tools.call' && value.method !== 'models.complete')
+      || !isRecord(value.params) || !isDeadline(value.timeout_ms)) throw new Error('Python bridge emitted an invalid worker invocation')
+    validateCallbackParams(value.method, value.params)
+    return { kind: 'worker_invoke', id: value.id, lease: value.lease, method: value.method, params: value.params, timeout_ms: value.timeout_ms }
+  }
+  if (isRecord(value) && value.kind === 'worker_cancel') {
+    if (!hasExactKeys(value, ['kind', 'id', 'lease', 'invocation_id']) || !isWorkerId(value.id) || !isWorkerLease(value.lease) || !isWorkerId(value.invocation_id)) throw new Error('Python bridge emitted an invalid worker cancel')
+    return { kind: 'worker_cancel', id: value.id, lease: value.lease, invocation_id: value.invocation_id }
+  }
+  if (isRecord(value) && value.kind === 'worker_release') {
+    if (!hasExactKeys(value, ['kind', 'id', 'lease']) || !isWorkerId(value.id) || !isWorkerLease(value.lease)) throw new Error('Python bridge emitted an invalid worker release')
+    return { kind: 'worker_release', id: value.id, lease: value.lease }
+  }
   if (isRecord(value) && value.kind === 'callback') {
     if (!hasExactKeys(value, ['kind', 'id', 'parent_id', 'method', 'params'])
       || !isBoundedCallbackId(value.id) || !isBoundedCallbackId(value.parent_id)
-      || (value.method !== 'tools.list' && value.method !== 'tools.call' && value.method !== 'models.complete')
+      || (value.method !== 'tools.list' && value.method !== 'tools.call'
+        && value.method !== 'models.complete' && value.method !== 'mailbox.delivery')
       || !isRecord(value.params)) {
       throw new Error('Python bridge emitted an invalid callback envelope')
     }

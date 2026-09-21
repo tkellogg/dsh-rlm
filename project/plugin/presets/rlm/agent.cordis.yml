@@ -263,9 +263,9 @@
 
 # ── RLM controller ─────────────────────────────────────────────────────────
 
-# The runtime tool owns the persistent Python bridge. The policy keeps ordinary
-# tools available to delegated children while collapsing only the root agent's
-# model-visible catalog to execute_python.
+# The runtime tool owns one persistent Python bridge per live agent. The policy
+# collapses every agent effectively composed under this preset, including
+# delegated children, to the model-visible execute_python catalog.
 - id: dsh-rlm
   name: ../../lib/index.js
 

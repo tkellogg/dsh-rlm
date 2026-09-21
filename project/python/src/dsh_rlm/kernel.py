@@ -12,17 +12,32 @@ import os
 import pickle
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from .checkpoint import CheckpointReport, CheckpointStore, RestoreReport, ValueIssue
+from .inspection import (
+    CheckpointAttemptRecord,
+    DurableSnapshotRecord,
+    LiveValueRecord,
+    RuntimeInspectionProvider,
+    StateInspection,
+    page_live_values,
+)
 from .recovery import RecoveryReport
 from .repl import CellResult, PersistentREPL
 from .runtime import Runtime
 
 _RUN_STATE_NAME = "dirty-run"
 _SESSION_LOCK_NAME = "session.lock"
+_CHECKPOINT_TERMINATE_GRACE_SECONDS = 0.25
+_CHECKPOINT_KILL_GRACE_SECONDS = 1.0
+_ROUTINE_CHECKPOINT_NAMES = frozenset(("runtime",))
+_ROUTINE_CHECKPOINT_REASONS = frozenset(
+    ("internal name", "imported module is not recoverable")
+)
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -66,12 +81,29 @@ def _safe_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {detail[:200]}" if detail else type(error).__name__
 
 
+def _meaningful_checkpoint_issues(
+    issues: tuple[ValueIssue, ...],
+) -> tuple[ValueIssue, ...]:
+    """Exclude only structural/routine names from automatic transition notices."""
+    return tuple(
+        issue
+        for issue in issues
+        if issue.name not in _ROUTINE_CHECKPOINT_NAMES
+        and issue.reason not in _ROUTINE_CHECKPOINT_REASONS
+    )
+
+
 def _checkpoint_worker(
     store: CheckpointStore,
     namespace: dict[str, Any],
+    checkpoint_path: str,
     report_path: str,
 ) -> None:
     try:
+        # Workers write a private generation.  Only the live owning kernel may
+        # publish it to the canonical checkpoint path after it validates its
+        # ownership generation.
+        store.path = Path(checkpoint_path)
         report = store.save(namespace)
     except BaseException as error:
         report = CheckpointReport(error=_safe_text(error))
@@ -117,7 +149,11 @@ class LocalKernel:
         self.dirty_marker_path = self.session_dir / _RUN_STATE_NAME
 
         self.checkpoint_store = CheckpointStore(self.checkpoint_path)
-        self.runtime = Runtime(rlm=True)
+        self.runtime = Runtime(
+            rlm=True, _driver_mailbox_id=os.environ.get("DSH_RLM_DRIVER_MAILBOX_ID")
+        )
+        # Kernel-bound, read-only access avoids recursive bridge invocation.
+        self.runtime.inspection = RuntimeInspectionProvider(self.inspect_state)
         seeded_globals = dict(initial_globals or {})
         seeded_globals["runtime"] = self.runtime
         self.repl = PersistentREPL(seeded_globals, max_output_chars=max_output_chars)
@@ -126,15 +162,20 @@ class LocalKernel:
         self._operation_lock: asyncio.Lock | None = None
         self._close_lock: asyncio.Lock | None = None
         self._active_execution: asyncio.Task[Any] | None = None
+        self._checkpoint_cleanup: asyncio.Future[str | None] | None = None
         self._latest_cell_ok: bool | None = None
         self._session_lock_fd: int | None = None
         self._notice_taken = False
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc).isoformat()
         self.last_checkpoint: CheckpointReport | None = None
+        self._durable_checkpoint: CheckpointReport | None = None
         self._checkpoint_id: str | None = None
         self._checkpoint_created_at: str | None = None
         self._checkpoint_error: str | None = None
+        self._previous_checkpoint_issues: set[tuple[str, str]] = set()
+        self._previous_checkpoint_error: str | None = None
+        self._ownership_generation = 0
         self.recovery_report: RecoveryReport | None
         self.recovery_notice: str | None
 
@@ -166,6 +207,13 @@ class LocalKernel:
             self.restore_report = restore_report
             self._checkpoint_id = restore_report.checkpoint_id
             self._checkpoint_created_at = restore_report.created_at
+            if restore_report.checkpoint_id and restore_report.created_at:
+                self._durable_checkpoint = CheckpointReport(
+                    saved=restore_report.restored,
+                    skipped=restore_report.skipped,
+                    checkpoint_id=restore_report.checkpoint_id,
+                    created_at=restore_report.created_at,
+                )
             # Never retain a runtime, mailbox, or handle from a trusted snapshot.
             self.repl.globals["runtime"] = self.runtime
 
@@ -342,57 +390,130 @@ class LocalKernel:
             (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode(),
         )
 
-    async def _save_checkpoint(self) -> CheckpointReport:
-        """Serialize in a killable fork worker so user hooks cannot stall the loop."""
+    async def _stop_checkpoint_worker(
+        self,
+        process: multiprocessing.Process,
+        join_task: asyncio.Task[None],
+    ) -> bool:
+        """Bound termination, escalate to kill, and reap the worker."""
+        if not process.is_alive():
+            await asyncio.shield(join_task)
+            return True
+        process.terminate()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(join_task), _CHECKPOINT_TERMINATE_GRACE_SECONDS
+            )
+            return True
+        except TimeoutError:
+            pass
+        if process.is_alive():
+            process.kill()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(join_task), _CHECKPOINT_KILL_GRACE_SECONDS
+            )
+        except TimeoutError:
+            return False
+        return not process.is_alive()
+
+    async def _save_checkpoint(
+        self, ownership_generation: int, *, allow_closed: bool = False
+    ) -> CheckpointReport:
+        """Serialize privately, then publish only for the current owner."""
         context = multiprocessing.get_context("fork")
         descriptor, report_name = tempfile.mkstemp(
             prefix=".checkpoint-report.", suffix=".pickle", dir=self.session_dir
         )
         os.close(descriptor)
         os.unlink(report_name)
+        descriptor, staged_name = tempfile.mkstemp(
+            prefix=".checkpoint-generation.", suffix=".dill", dir=self.session_dir
+        )
+        os.close(descriptor)
+        os.unlink(staged_name)
         process = context.Process(
             target=_checkpoint_worker,
-            args=(self.checkpoint_store, dict(self.repl.globals), report_name),
+            args=(
+                self.checkpoint_store,
+                dict(self.repl.globals),
+                staged_name,
+                report_name,
+            ),
             daemon=True,
         )
         process.start()
         join_task = asyncio.create_task(asyncio.to_thread(process.join))
+        loop = asyncio.get_running_loop()
+        cleanup_done = loop.create_future()
+        self._checkpoint_cleanup = cleanup_done
+        cleanup_error: str | None = None
+        timed_out = False
         try:
-            await asyncio.wait_for(asyncio.shield(join_task), self.checkpoint_timeout)
-        except TimeoutError:
-            if process.is_alive():
-                process.terminate()
-            await join_task
-            return CheckpointReport(
-                error=f"checkpoint worker exceeded {self.checkpoint_timeout:g} seconds"
-            )
-        except asyncio.CancelledError:
-            if process.is_alive():
-                process.terminate()
-            await asyncio.shield(join_task)
-            raise
-        finally:
-            if process.is_alive():
-                process.terminate()
-                await asyncio.shield(asyncio.to_thread(process.join))
-
-        try:
-            with open(report_name, "rb") as stream:
-                report = pickle.load(stream)
-        except BaseException as error:
-            return CheckpointReport(
-                error=f"checkpoint worker failed: {_safe_text(error)}"
-            )
-        finally:
             try:
-                os.unlink(report_name)
-            except FileNotFoundError:
-                pass
-        if not isinstance(report, CheckpointReport):
-            return CheckpointReport(
-                error="checkpoint worker returned an invalid report"
-            )
-        return report
+                await asyncio.wait_for(
+                    asyncio.shield(join_task), self.checkpoint_timeout
+                )
+            except TimeoutError:
+                timed_out = True
+                if not await self._stop_checkpoint_worker(process, join_task):
+                    cleanup_error = "checkpoint worker could not be reaped after kill"
+            except asyncio.CancelledError:
+                if not await asyncio.shield(
+                    self._stop_checkpoint_worker(process, join_task)
+                ):
+                    cleanup_error = "checkpoint worker could not be reaped after cancellation"
+                raise
+
+            if timed_out:
+                detail = f"checkpoint worker exceeded {self.checkpoint_timeout:g} seconds"
+                if cleanup_error is not None:
+                    detail += f"; {cleanup_error}"
+                return CheckpointReport(error=detail)
+            if cleanup_error is not None:
+                return CheckpointReport(error=cleanup_error)
+
+            try:
+                with open(report_name, "rb") as stream:
+                    report = pickle.load(stream)
+            except BaseException as error:
+                return CheckpointReport(
+                    error=f"checkpoint worker failed: {_safe_text(error)}"
+                )
+            if not isinstance(report, CheckpointReport):
+                return CheckpointReport(
+                    error="checkpoint worker returned an invalid report"
+                )
+            if not report.ok:
+                return report
+            if (
+                ownership_generation != self._ownership_generation
+                or (self._closed and not allow_closed)
+            ):
+                raise asyncio.CancelledError
+            try:
+                os.replace(staged_name, self.checkpoint_path)
+            except OSError as error:
+                return replace(report, error=f"write failed: {_safe_text(error)}")
+            return report
+        finally:
+            if process.is_alive():
+                reaped = await asyncio.shield(
+                    self._stop_checkpoint_worker(process, join_task)
+                )
+                if not reaped:
+                    cleanup_error = "checkpoint worker could not be reaped after kill"
+            for temporary_name in (report_name, staged_name):
+                try:
+                    os.unlink(temporary_name)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            if not cleanup_done.done():
+                cleanup_done.set_result(cleanup_error)
+            if self._checkpoint_cleanup is cleanup_done:
+                self._checkpoint_cleanup = None
 
     async def execute(
         self,
@@ -420,6 +541,7 @@ class LocalKernel:
                 raise RuntimeError("LocalKernel.execute requires an asyncio task")
             self._active_execution = current
             self._latest_cell_ok = False
+            ownership_generation = self._ownership_generation
             try:
                 async with self.runtime.bind():
                     if host_callback is None or callback_parent_id is None:
@@ -435,11 +557,38 @@ class LocalKernel:
                 if result.ok:
                     self.repl.globals["runtime"] = self.runtime
                     try:
-                        report = await self._save_checkpoint()
-                    except BaseException as error:
+                        report = await self._save_checkpoint(ownership_generation)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
                         report = CheckpointReport(error=_safe_text(error))
+                    meaningful = _meaningful_checkpoint_issues(report.skipped)
+                    current_issues = {
+                        (issue.name, issue.reason) for issue in meaningful
+                    }
+                    newly_skipped = tuple(
+                        issue
+                        for issue in meaningful
+                        if (issue.name, issue.reason)
+                        not in self._previous_checkpoint_issues
+                    )
+                    self._previous_checkpoint_issues = current_issues
+                    notice_error = (
+                        report.error
+                        if report.error is not None
+                        and report.error != self._previous_checkpoint_error
+                        else None
+                    )
+                    self._previous_checkpoint_error = report.error
+                    if newly_skipped or notice_error is not None:
+                        report = replace(
+                            report,
+                            newly_skipped=newly_skipped,
+                            notice_error=notice_error,
+                        )
                     self.last_checkpoint = report
                     if report.ok:
+                        self._durable_checkpoint = report
                         self._checkpoint_id = report.checkpoint_id
                         self._checkpoint_created_at = report.created_at
                         self._checkpoint_error = None
@@ -452,6 +601,75 @@ class LocalKernel:
             finally:
                 if self._active_execution is current:
                     self._active_execution = None
+
+    def inspect_state(self, *, offset: int = 0, limit: int = 100) -> StateInspection:
+        """Inspect bounded metadata without serializing or rendering live values."""
+        if self._closed or not self.runtime.authoritative:
+            raise RuntimeError("kernel is closed or no longer authoritative")
+        report = self._durable_checkpoint
+        saved = set(report.saved) if report is not None else set()
+        skipped = (
+            {issue.name: issue.reason for issue in report.skipped}
+            if report is not None
+            else {}
+        )
+        live = []
+        for name, value in self.repl.globals.items():
+            if type(name) is not str or name.startswith("__") or name == "runtime":
+                continue
+            value_type = type(value)
+            try:
+                type_name = object.__getattribute__(value_type, "__name__")
+            except BaseException:
+                type_name = "<unknown>"
+            if not isinstance(type_name, str):
+                type_name = "<unknown>"
+            live.append(
+                LiveValueRecord(
+                    name=(name if len(name) <= 512 else name[:511] + "…"),
+                    type_name=type_name[:128],
+                    snapshot_contains_name=name in saved,
+                    snapshot_exclusion_reason=skipped.get(name),
+                )
+            )
+        durable = None
+        if report is not None:
+            bound = lambda text: text if len(text) <= 512 else text[:511] + "…"
+            saved_page = tuple(bound(name) for name in report.saved[offset : offset + limit])
+            skipped_page = tuple(
+                (bound(issue.name), bound(issue.reason))
+                for issue in report.skipped[offset : offset + limit]
+            )
+            durable = DurableSnapshotRecord(
+                checkpoint_id=report.checkpoint_id,
+                created_at=report.created_at,
+                byte_count=report.byte_count,
+                saved_names=saved_page,
+                saved_total=len(report.saved),
+                saved_truncated=offset + len(saved_page) < len(report.saved),
+                skipped=skipped_page,
+                skipped_total=len(report.skipped),
+                skipped_truncated=offset + len(skipped_page) < len(report.skipped),
+            )
+        attempt = (
+            CheckpointAttemptRecord(
+                self.last_checkpoint.ok,
+                (
+                    self.last_checkpoint.error
+                    if self.last_checkpoint.error is None
+                    or len(self.last_checkpoint.error) <= 512
+                    else self.last_checkpoint.error[:511] + "…"
+                ),
+            )
+            if self.last_checkpoint is not None
+            else None
+        )
+        return StateInspection(
+            inspected_at=datetime.now(timezone.utc).isoformat(),
+            live=page_live_values(live, offset=offset, limit=limit),
+            durable=durable,
+            last_attempt=attempt,
+        )
 
     def take_recovery_notice(self) -> str | None:
         """Return recovery context once, including a deliberate ``None``."""
@@ -470,6 +688,7 @@ class LocalKernel:
             if self._closed:
                 return
             self._closed = True
+            self._ownership_generation += 1
             active = self._active_execution
             active_interrupted = active is not None and not active.done()
             if active_interrupted and active is not asyncio.current_task():
@@ -488,11 +707,18 @@ class LocalKernel:
             marker_error: BaseException | None = None
             runtime_error: BaseException | None = None
             try:
+                cleanup = self._checkpoint_cleanup
+                if cleanup is not None:
+                    await asyncio.shield(cleanup)
                 if not active_interrupted and self._latest_cell_ok is True:
                     self.repl.globals["runtime"] = self.runtime
                     try:
-                        report = await self._save_checkpoint()
-                    except BaseException as error:
+                        report = await self._save_checkpoint(
+                            self._ownership_generation, allow_closed=True
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
                         report = CheckpointReport(error=_safe_text(error))
                     self.last_checkpoint = report
                     if report.ok:

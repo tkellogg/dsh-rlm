@@ -2,7 +2,7 @@ import asyncio
 
 import dill
 import pytest
-from pydantic import BaseModel, field_validator
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, field_validator
 
 from dsh_rlm import (
     MailboxClosedError,
@@ -123,6 +123,82 @@ async def test_pydantic_typed_boundary_is_strict():
         assert msg.body.count == 2
         with pytest.raises(MessageValidationError):
             await send_as(root, {"text": "bad", "count": "2"}, to=mailbox)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_model", [False, True])
+@pytest.mark.parametrize("alias_kind", ["ordinary", "split", "path"])
+@pytest.mark.parametrize("serialize_by_alias", [False, True])
+async def test_pydantic_aliases_preserve_strict_detached_boundary(
+    as_model, alias_kind, serialize_by_alias
+):
+    if alias_kind == "ordinary":
+        field = Field(alias="wire_items")
+    elif alias_kind == "split":
+        field = Field(validation_alias="wire_items", serialization_alias="output_items")
+    else:
+        field = Field(
+            validation_alias=AliasChoices(AliasPath("payload", "items"), "wire_items"),
+            serialization_alias="output_items",
+        )
+
+    class AliasedChild(BaseModel):
+        model_config = ConfigDict(extra="forbid", serialize_by_alias=serialize_by_alias)
+        items: list[int] = field
+
+    class AliasedMessage(BaseModel):
+        model_config = ConfigDict(extra="forbid", serialize_by_alias=serialize_by_alias)
+        child: AliasedChild = Field(alias="wire_child")
+
+    root = Runtime()
+    mailbox = await root.mailboxes.create(
+        config=MailboxConfig(message_type=AliasedMessage)
+    )
+    values = [1, 2]
+    child_data = (
+        {"payload": {"items": values}}
+        if alias_kind == "path"
+        else {"wire_items": values}
+    )
+    data = {"wire_child": child_data}
+    body = AliasedMessage.model_validate(data) if as_model else data
+    async with root:
+        await send_as(root, body, to=mailbox)
+        if as_model:
+            body.child.items.append(3)
+        else:
+            values.append(3)
+        received = mailbox.receive_nowait().body
+        assert isinstance(received, AliasedMessage)
+        assert isinstance(received.child, AliasedChild)
+        assert received.child.items == [1, 2]
+        if as_model:
+            assert received is not body
+            assert received.child is not body.child
+        received.child.items.append(4)
+        assert (body.child.items if as_model else values) == [1, 2, 3]
+
+        # Names used internally must not become valid external input names.
+        invalid_inputs = [
+            {"child": {"wire_items": [1]}},
+            {"wire_child": {"items": [1]}},
+            {"wire_child": {"output_items": [1]}},
+            {"wire_child": {"wire_items": ["1"]}},
+            {"wire_child": {"wire_items": [1], "unknown": 2}},
+        ]
+        for invalid in invalid_inputs:
+            with pytest.raises(MessageValidationError):
+                await send_as(root, invalid, to=mailbox)
+
+        # Instances can be mutated or built without validation; never trust them.
+        invalid_model = AliasedMessage.model_construct(
+            child=AliasedChild.model_construct(items=["1"])
+        )
+        with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
+            with pytest.raises(MessageValidationError):
+                await send_as(root, invalid_model, to=mailbox)
+        with pytest.raises(asyncio.QueueEmpty):
+            mailbox.receive_nowait()
 
 
 @pytest.mark.asyncio
@@ -262,17 +338,35 @@ async def test_runtime_bind_is_scoped_and_does_not_close_runtime():
 
 
 @pytest.mark.asyncio
-async def test_explicit_mailbox_close_unregisters_backend():
+async def test_explicit_mailbox_close_unregisters_backend_but_remains_owned():
     root = Runtime()
     async with root.bind():
         mailbox = await root.mailboxes.create()
         address = mailbox.id
         await mailbox.close()
-        assert mailbox not in root._owned_mailboxes
+        assert mailbox in root._owned_mailboxes
         with pytest.raises(MailboxNotFoundError):
             await root.mailboxes.get(address)
     assert set(root._state.registry._mailboxes) == {root.mailbox.id}
     await root.close()
+    assert mailbox not in root._owned_mailboxes
+
+
+@pytest.mark.asyncio
+async def test_closed_mailbox_drains_live_but_run_exit_discards_pending_queue():
+    root = Runtime()
+    mailbox = await root.mailboxes.create()
+    await send_as(root, "drain", to=mailbox)
+    await send_as(root, "discard", to=mailbox)
+
+    async with root.bind():
+        await mailbox.close()
+        assert (await mailbox.receive()).body == "drain"
+        assert [message.body for message in mailbox._queue] == ["discard"]
+
+    await root.close()
+    assert mailbox.closed
+    assert not mailbox._queue
 
 
 @pytest.mark.asyncio

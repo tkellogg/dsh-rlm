@@ -150,9 +150,10 @@ def _validate_model(model_type: type[Any], body: Any) -> Any:
             "typed model mailboxes require the pydantic package"
         ) from exc
 
-    if isinstance(body, model_type):
+    is_model = isinstance(body, model_type)
+    if is_model:
         try:
-            raw = body.model_dump(mode="json")
+            raw = body.model_dump(mode="json", by_alias=False)
         except Exception as exc:
             raise MessageValidationError(
                 f"model cannot be represented as JSON: {exc}"
@@ -164,7 +165,15 @@ def _validate_model(model_type: type[Any], body: Any) -> Any:
     try:
         adapter = TypeAdapter(model_type)
         # strict=True rejects e.g. {"count": "1"} for an int field.
-        validated = adapter.validate_python(raw, strict=True)
+        if is_model:
+            # A model dump uses internal field names, not necessarily the
+            # model's validation aliases (which can even be AliasPaths).
+            validated = adapter.validate_python(
+                raw, strict=True, by_alias=False, by_name=True
+            )
+        else:
+            # External JSON must still obey the model's configured input rules.
+            validated = adapter.validate_python(raw, strict=True)
     except ValidationError as exc:
         field = None
         if exc.errors():
@@ -174,10 +183,14 @@ def _validate_model(model_type: type[Any], body: Any) -> Any:
             f"body does not match {model_type.__name__}: {exc}", field=field
         ) from exc
     try:
-        canonical = _json_clone(validated.model_dump(mode="json"))
-        # Reconstruct from canonical JSON so the queued value is detached from
-        # a sender-owned model instance.
-        return adapter.validate_python(canonical, strict=True)
+        canonical = _json_clone(validated.model_dump(mode="json", by_alias=False))
+        # Reconstruct by internal names recursively, independently of input or
+        # serialization aliases. Only these trusted dumps get name validation;
+        # enabling it on external dictionaries would broaden accepted inputs.
+        # The JSON clone keeps the queued value detached from sender objects.
+        return adapter.validate_python(
+            canonical, strict=True, by_alias=False, by_name=True
+        )
     except (ValidationError, AttributeError, TypeError, ValueError) as exc:
         raise MessageValidationError(
             f"body for {model_type.__name__} cannot cross the JSON boundary: {exc}"
@@ -277,6 +290,10 @@ class MailboxRef:
         from .runtime import current_runtime
 
         sender_runtime = current_runtime()
+        if backend.driver_managed:
+            return await backend._deliver_driver(
+                body, sender_runtime.mailbox, mode=mode, timeout=timeout
+            )
         return backend._admit(body, sender_runtime.mailbox, mode=mode)
 
 
@@ -363,6 +380,55 @@ class Mailbox(MailboxRef, Generic[M]):
             )
         return copied
 
+    async def _deliver_driver(
+        self,
+        body: Any,
+        sender: Mailbox[Any],
+        *,
+        mode: str | None,
+        timeout: float,
+    ) -> SendReceipt:
+        """Ask the active host lease to admit input to its owning DSH driver."""
+        if self._closed or not self._owner_runtime.authoritative:
+            raise MailboxClosedError(self.id)
+        if sender.closed or not sender._owner_runtime.authoritative:
+            raise MailboxClosedError(sender.id)
+        resolved_mode = "steer" if mode is None else mode
+        if resolved_mode not in _DELIVERY_MODES:
+            raise UnsupportedDeliveryModeError(
+                f"unknown delivery mode {resolved_mode!r}"
+            )
+        copied = self._validate_body(body)
+        if self._closed or not self._owner_runtime.authoritative:
+            raise MailboxClosedError(self.id)
+        if sender.closed or not sender._owner_runtime.authoritative:
+            raise MailboxClosedError(sender.id)
+        from .runtime import _invoke_host_callback
+
+        result = await asyncio.wait_for(
+            _invoke_host_callback(
+                self._owner_runtime,
+                "mailbox.delivery",
+                {
+                    "body": copied,
+                    "mode": resolved_mode,
+                    "mailbox_id": self.id,
+                    "capacity": self._config.capacity,
+                },
+            ),
+            timeout=timeout,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("host returned an invalid mailbox delivery receipt")
+        try:
+            message_id = result["message_id"]
+            accepted_at = result["accepted_at"]
+        except KeyError as exc:
+            raise RuntimeError("host returned an invalid mailbox delivery receipt") from exc
+        if not isinstance(message_id, str) or not isinstance(accepted_at, str):
+            raise RuntimeError("host returned an invalid mailbox delivery receipt")
+        return SendReceipt(message_id, self.id, accepted_at)
+
     def _admit(
         self,
         body: Any,
@@ -380,8 +446,10 @@ class Mailbox(MailboxRef, Generic[M]):
             raise UnsupportedDeliveryModeError(
                 f"mailbox {self.id!r} does not support RLM delivery modes"
             )
-        # mode=None is ordinary FIFO for code mailboxes and steer for a driver;
-        # there is no model driver in this package, so both are admitted locally.
+        if self._driver_managed:
+            raise UnsupportedDeliveryModeError(
+                "driver mailbox delivery requires an active host callback lease"
+            )
         copied = self._validate_body(body)
         # Pydantic validation and serialization can run user code.  Recheck
         # liveness after it returns so a reentrant close cannot accept a ghost
@@ -481,11 +549,14 @@ class Mailbox(MailboxRef, Generic[M]):
             raise StopAsyncIteration from exc
 
     async def close(self) -> None:
-        """Close admission while leaving queued messages available to drain."""
+        """Close admission while leaving queued messages available to drain.
+
+        The owner retains the closed mailbox until run finalization so any
+        payload left after an in-run drain is still discarded at that boundary.
+        """
         self._validate_receive_owner()
         self._close_for_runtime(discard=False)
         self._owner_runtime._state.registry.remove(self)
-        self._owner_runtime._owned_mailboxes.discard(self)
 
     def _close_for_runtime(self, *, discard: bool) -> None:
         if self._closed:
@@ -540,11 +611,13 @@ class Mailboxes:
     async def create(self, *, config: MailboxConfig | None = None) -> Mailbox[Any]:
         return self._create(config or MailboxConfig(), driver_managed=False)
 
-    def _create(self, config: MailboxConfig, *, driver_managed: bool) -> Mailbox[Any]:
+    def _create(
+        self, config: MailboxConfig, *, driver_managed: bool, mailbox_id: str | None = None
+    ) -> Mailbox[Any]:
         if not self._runtime.authoritative:
             raise MailboxClosedError(self._runtime.mailbox.id)
         mailbox = Mailbox(
-            uuid.uuid4().hex,
+            mailbox_id or uuid.uuid4().hex,
             self._runtime.agent_id,
             self._runtime,
             config,

@@ -20,6 +20,13 @@ from .errors import (
     RuntimeUnavailableError,
     UnsupportedOperationError,
 )
+from .inspection import (
+    InspectionPage,
+    ManagedLiveTaskRecord,
+    TerminalRecordStore,
+    page_managed_live_tasks,
+)
+from .host_workers import HostWorkers, worker_lease
 from .mailbox import (
     Mailbox,
     MailboxConfig,
@@ -59,6 +66,7 @@ class _HostCallbackScope:
     state: _RuntimeState
     parent_id: str
     callback: _HostCallback
+    driver_mailbox_id: str
     active: bool = True
     calls: int = 0
 
@@ -89,27 +97,36 @@ class AgentHandle(AgentRef, Generic[T]):
         if self.task.cancelled():
             return "cancelled"
         if self.task.done():
-            try:
-                failed = self.task.exception() is not None
-            except asyncio.CancelledError:
-                return "cancelled"
-            return "failed" if failed else "completed"
+            return self._runtime._status
         return self._runtime._status
 
 
 class _RuntimeState:
     def __init__(self) -> None:
         self.registry = _MailboxRegistry()
+        self.terminal_records = TerminalRecordStore()
 
 
 async def _invoke_host_callback(
     runtime: Runtime[Any], method: str, params: dict[str, Any]
 ) -> Any:
+    # Worker authority is bound to the exact admitted asyncio task.  Context
+    # inherited by a descendant never grants authority.
+    lease = worker_lease(runtime)
+    if lease is not None:
+        transport = runtime._host_worker_transport
+        if transport is None:
+            raise UnsupportedOperationError("host worker transport is unavailable")
+        return await transport.invoke(lease, method, params)
     scope = _HOST_CALLBACK_SCOPE.get()
     if scope is None or scope.state is not runtime._state or not scope.active:
         raise UnsupportedOperationError(
             f"{method} requires an active bridge execute cell with "
             'capability "host-callback-v1"'
+        )
+    if method == "mailbox.delivery" and params.get("mailbox_id") != scope.driver_mailbox_id:
+        raise PermissionDeniedError(
+            "mailbox delivery destination does not match the active driver"
         )
     return await scope.callback(scope.parent_id, method, params)
 
@@ -228,6 +245,7 @@ class Runtime(Generic[M]):
         rlm: bool = False,
         _state: _RuntimeState | None = None,
         _parent_runtime: Runtime[Any] | None = None,
+        _driver_mailbox_id: str | None = None,
     ) -> None:
         self.agent_id = agent_id or uuid.uuid4().hex
         existing = _LIVE_RUNTIMES.get(self.agent_id)
@@ -248,13 +266,24 @@ class Runtime(Generic[M]):
         self._context_token: contextvars.Token[Runtime[Any] | None] | None = None
         self._handle: AgentHandle[Any] | None = None
         self._rlm = rlm
+        self._started_at = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+        self._terminal_sequence: int | None = None
+        self._host_worker_transport: Any = None
+        self._host_worker_tasks: set[asyncio.Task[Any]] = set()
+        self._host_worker_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._host_worker_outcomes: list[dict[str, Any]] = []
+        self.host_workers = HostWorkers(self)
         self.tools = Tools(self)
         self.models = Models(self)
         self.processes = _UnavailableNamespace("processes")
         self.recovery = None
         self.mailboxes = Mailboxes(self, self._state.registry)
         self.mailbox = self.mailboxes._create(
-            mailbox or MailboxConfig(), driver_managed=rlm
+            mailbox or MailboxConfig(),
+            driver_managed=rlm,
+            mailbox_id=_driver_mailbox_id if rlm else None,
         )
 
     @property
@@ -344,6 +373,10 @@ class Runtime(Generic[M]):
         backend = target._backend
         if backend is None:
             raise MailboxNotFoundError(target.id)
+        if backend.driver_managed:
+            return await backend._deliver_driver(
+                body, sender_runtime.mailbox, mode=mode, timeout=timeout
+            )
         return backend._admit(body, sender_runtime.mailbox, mode=mode)
 
     async def run(
@@ -395,7 +428,9 @@ class Runtime(Generic[M]):
         self, parent_id: str, callback: _HostCallback
     ) -> AsyncIterator[None]:
         """Enable bridge callbacks for this cell and its task descendants."""
-        scope = _HostCallbackScope(self._state, parent_id, callback)
+        scope = _HostCallbackScope(
+            self._state, parent_id, callback, self.mailbox.id
+        )
         token = _HOST_CALLBACK_SCOPE.set(scope)
         try:
             yield
@@ -424,22 +459,97 @@ class Runtime(Generic[M]):
         token = _CURRENT_RUNTIME.set(self)
         try:
             self._status = "running"
-            return await _call_entry(entry, self)
+            result = await _call_entry(entry, self)
+        except asyncio.CancelledError:
+            self._status = "cancelled"
+            self._record_terminal()
+            raise
+        except BaseException as error:
+            self._status = "failed"
+            self._record_terminal(error)
+            raise
+        else:
+            self._status = "completed"
+            self._record_terminal()
+            return result
         finally:
             self._finalize()
             _CURRENT_RUNTIME.reset(token)
+
+    def _record_terminal(self, error: BaseException | None = None) -> None:
+        if self._terminal_sequence is not None:
+            return
+        error_type = None
+        error_message = None
+        if error is not None:
+            try:
+                error_class = object.__getattribute__(error, "__class__")
+                class_name = type.__getattribute__(error_class, "__name__")
+                if type(class_name) is str:
+                    error_type = class_name
+                args = BaseException.args.__get__(error, error_class)
+                if type(args) is tuple and args and type(args[0]) is str:
+                    error_message = args[0]
+            except BaseException:
+                # Metadata capture must never replace the original failure.
+                error_type = None
+                error_message = None
+        try:
+            record = self._state.terminal_records.append(
+            task_id=self.agent_id,
+            parent_id=self.parent.id if self.parent is not None else None,
+            name=self.name,
+            state=self._status if self._status in {"completed", "failed", "cancelled", "interrupted", "unknown"} else "unknown",
+            started_at=self._started_at,
+            error_type=error_type,
+            error_message=error_message,
+            )
+        except BaseException:
+            return
+        self._terminal_sequence = record.sequence
+
+    def inspect_tasks(self, *, after: int | None = None, offset: int = 0, limit: int = 100) -> InspectionPage[Any]:
+        """Inspect this owner's children; inspection never observes failures."""
+        if not self.authoritative:
+            raise RuntimeUnavailableError("runtime is not authoritative")
+        return self._state.terminal_records.inspect(
+            owner_id=self.agent_id, after=after, offset=offset, limit=limit
+        )
+
+    def inspect_live_tasks(self, *, offset: int = 0, limit: int = 100) -> InspectionPage[ManagedLiveTaskRecord]:
+        """Inspect directly owned live children without touching task results."""
+        if not self.authoritative:
+            raise RuntimeUnavailableError("runtime is not authoritative")
+        records = tuple(
+            ManagedLiveTaskRecord(
+                child.agent_id,
+                self.agent_id,
+                (
+                    child.name
+                    if type(child.name) is str and len(child.name) <= 512
+                    else child.name[:511] + "…"
+                    if type(child.name) is str
+                    else None
+                ),
+                child._status if child._status in {"starting", "running", "idle", "stopping"} else "stopping",
+                child._started_at,
+            )
+            for child in tuple(self._children)
+            if child._handle is not None and not child._handle.task.done()
+        )
+        return page_managed_live_tasks(
+            records, owner_id=self.agent_id, offset=offset, limit=limit
+        )
 
     def _task_done(self, task: asyncio.Task[Any]) -> None:
         # A task can be cancelled before _execute gets a chance to run.
         if task.cancelled():
             self._status = "cancelled"
-        else:
-            try:
-                exception = task.exception()
-            except asyncio.CancelledError:
-                self._status = "cancelled"
-            else:
-                self._status = "failed" if exception is not None else "completed"
+            self._record_terminal()
+        elif self._status not in ("completed", "failed"):
+            # Cancellation before _execute starts has no wrapper outcome.
+            self._status = "unknown"
+            self._record_terminal()
         self._finalize()
         if self._parent_runtime is not None:
             self._parent_runtime._children.discard(self)
@@ -455,6 +565,14 @@ class Runtime(Generic[M]):
             # finally this remains running until that callback executes.
             pass
         current = asyncio.current_task()
+        if self._rlm and self._host_worker_transport is not None:
+            retire = getattr(self._host_worker_transport, "retire", None)
+            if retire is not None: retire("root runtime closed")
+            self._host_worker_transport = None
+        for worker in tuple(self._host_worker_tasks):
+            if worker is not current and not worker.done(): worker.cancel()
+        for cleanup in tuple(self._host_worker_cleanup_tasks):
+            if cleanup is not current and not cleanup.done(): cleanup.cancel()
         for child in tuple(self._children):
             task = child._handle.task if child._handle is not None else None
             if task is not None and task is not current and not task.done():

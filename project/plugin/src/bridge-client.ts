@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Buffer } from 'node:buffer'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import type { Writable } from 'node:stream'
 import { TextDecoder } from 'node:util'
@@ -20,6 +20,7 @@ import {
   type CallbackRequest,
   type CallbackResult,
   type ExecuteResult,
+  type WorkerRequest,
 } from './protocol.js'
 
 const STDERR_MAX_BYTES = 64 * 1024
@@ -28,10 +29,22 @@ const DEFAULT_LIFECYCLE_WAIT_MS = 2_000
 const DEFAULT_CALLBACK_WAIT_MS = 120_000
 const CALLBACK_ERROR_MAX_CHARS = 8 * 1024
 
-const callbackBridgeScope = new AsyncLocalStorage<string>()
+interface CallbackBridgeScope {
+  readonly key: string
+  active: boolean
+}
+
+const callbackBridgeScope = new AsyncLocalStorage<CallbackBridgeScope>()
+
+/** Run host work whose independent async descendants must not inherit re-entry state. */
+export function outsideBridgeCallbackScope<T>(operation: () => T): T {
+  return callbackBridgeScope.exit(operation)
+}
 
 export interface BridgeCallbackDispatcher {
   dispatch(request: CallbackRequest, context: unknown, signal: AbortSignal): Promise<unknown>
+  dispatchWorker?(request: WorkerRequest, context: unknown, bridgeInstanceId: string): Promise<Record<string, unknown>>
+  revokeWorkers?(bridgeInstanceId: string, reason: unknown): void
 }
 
 class BridgeProtocolError extends Error {
@@ -147,9 +160,12 @@ class BridgeClient {
   private stopped = false
   private stopPromise: Promise<void> | undefined
   private readonly decoder: BoundedLineDecoder
+  private readonly workerIds = new Set<string>()
+  private readonly seenWorkerIds = new Set<string>()
 
   constructor(
     readonly key: string,
+    private readonly bridgeInstanceId: string,
     private readonly handle: SubprocessHandle,
     private readonly onStopped: (client: BridgeClient) => void,
     private readonly lifecycleWaitMs: number,
@@ -266,10 +282,6 @@ class BridgeClient {
 
   private onLine(line: string): void {
     const pending = this.pending
-    if (pending === undefined) {
-      void this.stop(new BridgeProtocolError('Python bridge emitted an unsolicited response'))
-      return
-    }
     let frame
     try {
       frame = parseBridgeFrame(line)
@@ -277,14 +289,30 @@ class BridgeClient {
       void this.stop(error)
       return
     }
-    if ('kind' in frame) {
-      try {
-        this.startCallback(line, frame, pending)
-      } catch (error) {
-        void this.stop(error)
-      }
+    if ('kind' in frame && frame.kind !== 'callback') {
+      if (this.callbackDispatcher?.dispatchWorker === undefined) { void this.stop(new BridgeProtocolError('Worker protocol is not configured')); return }
+      if (frame.kind === 'worker_admit' && (pending === undefined || pending.method !== 'execute' || pending.finalResponse !== undefined || frame.parent_id !== pending.id)) { void this.stop(new BridgeProtocolError('Worker admission requires an active execute')); return }
+      if (this.seenWorkerIds.has(frame.id) || this.seenWorkerIds.size >= 4096 || this.workerIds.size >= MAX_CALLBACKS_IN_FLIGHT) { void this.stop(new BridgeProtocolError('Duplicate or excessive worker request id')); return }
+      this.seenWorkerIds.add(frame.id)
+      this.workerIds.add(frame.id)
+      const scope = { key: this.key, active: true }
+      const job = callbackBridgeScope.run(scope, async () => { try { return await this.callbackDispatcher!.dispatchWorker!(frame, pending?.callbackContext, this.bridgeInstanceId) } finally { scope.active = false } })
+      void job.then(result => {
+        try {
+          if (this.stopped) return
+          const responseLine = `${JSON.stringify(result)}\n`
+          if (Buffer.byteLength(responseLine, 'utf8') > MAX_CALLBACK_BYTES) throw new BridgeProtocolError('Worker result exceeds callback byte limit')
+          this.send(responseLine)
+        } catch (error) { void this.stop(error) }
+      }, error => { void this.stop(error) }).finally(() => { this.workerIds.delete(frame.id) }).catch(error => { void this.stop(error) })
       return
     }
+    if ('kind' in frame) {
+      if (pending === undefined) { void this.stop(new BridgeProtocolError('Python bridge emitted a callback outside execute')); return }
+      try { this.startCallback(line, frame, pending) } catch (error) { void this.stop(error) }
+      return
+    }
+    if (pending === undefined) { void this.stop(new BridgeProtocolError('Python bridge emitted an unsolicited response')); return }
     if (pending.finalResponse !== undefined) {
       void this.stop(new BridgeProtocolError('Python bridge emitted duplicate final responses'))
       return
@@ -359,11 +387,21 @@ class BridgeClient {
       if (this.callbackDispatcher === undefined) {
         throw callbackError('UNSUPPORTED_CALLBACK', 'Host callbacks are not configured')
       }
-      const dispatch = callbackBridgeScope.run(this.key, async () => await this.callbackDispatcher!.dispatch(
-        request,
-        pending.callbackContext,
-        pending.callbackAbort.signal,
-      ))
+      const scope: CallbackBridgeScope = { key: this.key, active: true }
+      const dispatch = callbackBridgeScope.run(scope, async () => {
+        try {
+          return await this.callbackDispatcher!.dispatch(
+            request,
+            pending.callbackContext,
+            pending.callbackAbort.signal,
+          )
+        } finally {
+          // Async resources spawned by the callback inherit this object. Mark it
+          // inactive when the direct callback unwinds so later independent work
+          // does not retain a false same-bridge re-entry guard.
+          scope.active = false
+        }
+      })
       const result = await withDeadline(dispatch, this.callbackWaitMs, jobSignal, () => {
         const error = callbackError('CALLBACK_TIMEOUT', `Host callback exceeded ${this.callbackWaitMs}ms`)
         if (!pending.callbackAbort.signal.aborted) pending.callbackAbort.abort(error)
@@ -408,6 +446,7 @@ class BridgeClient {
     this.stopPromise = stopped.promise
     this.stopped = true
     const error = reason instanceof Error ? reason : new Error(String(reason))
+    try { this.callbackDispatcher?.revokeWorkers?.(this.bridgeInstanceId, error) } catch { /* worker revocation cannot block stop */ }
     const pending = this.pending
     if (this.pending === pending) this.pending = undefined
     if (pending?.finalDrainTimer !== undefined) clearTimeout(pending.finalDrainTimer)
@@ -659,7 +698,8 @@ export class BridgePool {
     callbackContext?: unknown,
   ): Promise<ExecuteResult> {
     const key = sanitizeAgentId(String(agentId))
-    if (callbackBridgeScope.getStore() === key) {
+    const callbackScope = callbackBridgeScope.getStore()
+    if (callbackScope?.key === key && callbackScope.active) {
       throw new BridgeProtocolError('execute_python cannot re-enter its active Python bridge')
     }
     const generation = this.generations.get(key) ?? 0
@@ -776,12 +816,18 @@ export class BridgePool {
         stderr: { maxBytes: STDERR_MAX_BYTES },
       },
       graceMs: TERMINATE_GRACE_MS,
-      env: { PYTHONUNBUFFERED: '1' },
+      env: {
+        PYTHONUNBUFFERED: '1',
+        // Host-generated per-bridge destination binding. Python may echo it,
+        // but cannot redirect this bridge to another live agent.
+        DSH_RLM_DRIVER_MAILBOX_ID: key,
+      },
     })
     let client: BridgeClient
     try {
       client = new BridgeClient(
         key,
+        `${key}:${generation}:${randomUUID()}`,
         handle,
         stopped => { this.beginRetirement(key, stopped) },
         this.options.lifecycleWaitMs,

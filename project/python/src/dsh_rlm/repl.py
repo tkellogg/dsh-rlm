@@ -30,6 +30,8 @@ from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from typing import Any, Mapping, TextIO
 
+from .inspection import InspectionPage, RawTaskRecord
+
 _TRUNCATION_MARKER = "... [truncated]"
 
 
@@ -351,6 +353,7 @@ class PersistentREPL:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._owner_task: asyncio.Task[Any] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._terminal_tasks: deque[RawTaskRecord] = deque(maxlen=256)
         self._future_flags = 0
         self._source_filenames: deque[str] = deque()
         self._cell_number = 0
@@ -384,7 +387,36 @@ class PersistentREPL:
         if task is self._owner_task:
             return
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        def finished(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            state = "cancelled" if done.cancelled() else "terminal_unknown"
+            self._terminal_tasks.append(
+                RawTaskRecord(hex(id(done)), done.get_name()[:128], state)
+            )
+        task.add_done_callback(finished)
+
+    def inspect_tasks(
+        self, *, offset: int = 0, limit: int = 100
+    ) -> InspectionPage[RawTaskRecord]:
+        """Return bounded task metadata without retrieving task exceptions."""
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be an integer from 1 through 200")
+        records = list(self._terminal_tasks)
+        for task in sorted(self._background_tasks, key=id):
+            if task.cancelled():
+                state = "cancelled"
+            elif task.done():
+                state = "terminal_unknown"
+            else:
+                state = "running"
+            records.append(RawTaskRecord(hex(id(task)), task.get_name()[:128], state))
+        page = tuple(records[offset : offset + limit])
+        return InspectionPage(
+            items=page, total=len(records), offset=offset, returned=len(page),
+            truncated=offset + len(page) < len(records),
+        )
 
     def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         """Return tasks created by cells or their descendants that are still live."""
