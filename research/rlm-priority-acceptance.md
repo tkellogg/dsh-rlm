@@ -35,4 +35,4 @@ Worker IDs are never reused within a bridge generation. A 4096-request cap fails
 
 User handles deployment: rebuild the plugin, ensure the configured Python interpreter imports this updated package, then reload/restart the existing harness using the normal deployment process. No replacement server, live restart, or deployment was performed. After deployment verify a fresh RLM child and an explicitly admitted worker operating after its originating cell returns. Cold resume and live service-specific behaviors remain deployment acceptance checks.
 
-Issue15 auto-compaction remains tracked and deliberately deferred; existence has not been verified. No pubsub/channel, GUI, provider allowlist, benchmark, or automatic wakeup redesign is included. All changes coexist with pre-existing edits; no commits/reset/stash were performed.
+Issue 15 auto-compaction is source/test accepted: RLM inherits shipped Standard compaction and the installed pruner has safety-edge coverage. Live root/child/recovery `/compact` acceptance remains pending. No pubsub/channel, GUI, provider allowlist, benchmark, or automatic wakeup redesign is included.

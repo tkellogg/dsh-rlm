@@ -1,6 +1,6 @@
 # Runtime tasks as agents
 
-Status: agreed direction; execution placement and API are not fixed.
+Status: process-live managed host workers are implemented and source/test accepted; default process placement, parent-end policy, and child permission narrowing remain open.
 See the [Python API draft](python-api.md) for proposed classes and methods.
 
 ## Definition

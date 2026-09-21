@@ -105,18 +105,22 @@ model calls can be combined with `asyncio.gather`. Nested tool calls are
 serialized because direct `ToolRuntime.execute` does not expose the agent loop's
 tool scheduler.
 
-Host callbacks are valid only while the creating `execute_python` cell is active.
-Await every host call before the cell ends. `execute_python` and
-`subagent_fork` are rejected through `runtime.tools.call`. Each execute has a
-120-second host callback deadline, a 64-call total limit, and a 32-call in-flight
-limit.
+Ordinary host callbacks are valid only while the creating `execute_python` cell
+is active, so await those calls before the cell ends. Post-cell host access is
+available only through an explicitly admitted `runtime.host_workers` worker,
+which receives fresh bounded authority for each invocation and is retired with
+its owning bridge. Neither path retries uncertain external effects.
+`execute_python` and `subagent_fork` are rejected through `runtime.tools.call`.
+Each execute has a 120-second host callback deadline, a 64-call total limit, and
+a 32-call in-flight limit.
 
 Nested tools preserve the owning agent, permission and approval path,
 cancellation signal, parent tool token, root call ID, extra contexts, and
 turn-conclusion flag. Nested model calls use DSH's configured LLM service and do
-not run model-emitted tools. In this out-of-tree slice, nested calls are covered
-by the persisted outer `execute_python` call but do not receive a separate
-durable nested-call record.
+not run model-emitted tools. Direct active-cell callbacks are covered by the
+persisted outer `execute_python` call rather than a separate durable nested-call
+record. Managed worker calls retain bounded process-live diagnostics, including
+uncertain terminal outcomes, but not a crash-durable effect ledger.
 
 ## Native tool result
 

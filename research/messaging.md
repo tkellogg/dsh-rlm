@@ -1,6 +1,6 @@
 # Messaging
 
-Status: delivery rules decided; API and type format still open.
+Status: bounded driver-inbox delivery and typed local mailboxes are implemented and source/test accepted; the public address/type API and non-RLM delivery policy remain open.
 
 ## Mailboxes
 
