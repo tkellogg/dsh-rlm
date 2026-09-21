@@ -9,7 +9,7 @@ See the [runtime](runtime-tasks.md), [messaging](messaging.md), and
 ## Rules
 
 - Async methods do work when awaited. Importing the package starts nothing.
-- `spawn` and process `start` wait for admission and return handles, not results.
+- `spawn_program` and process `start` wait for admission and return handles, not results.
 - Local agent handles expose real `asyncio.Task` objects. Use normal task awaiting,
   cancellation, results, and exceptions; there is no custom agent `wait` method.
 - Choose `asyncio.shield` explicitly when cancelling a wait must not cancel the task.
@@ -120,7 +120,7 @@ A spawned one-task RLM returns its final text when its work and accepted follow-
 finish, then closes its mailbox. A persistent interactive RLM remains alive while
 idle. A saved session can resume later, with a new run, task, and mailbox.
 
-Children belong to their parent run, not the cell or function that called `spawn`.
+Children belong to their parent run, not the cell or function that called `spawn_program`.
 The runtime keeps strong references and observes completion even if a handle is
 dropped. That ownership does not suppress ordinary asyncio cancellation through
 an `await`. Proposed default: ending the parent run requests child cancellation.
@@ -374,7 +374,7 @@ async def worker(rt: Runtime[Question]) -> str:
     await rt.send(answer["text"], to=message.body.reply_to or message.sender)
     return answer["text"]
 
-child = await runtime.spawn(
+child = await runtime.spawn_program(
     worker, name="reviewer", mailbox=MailboxConfig(message_type=Question),
 )
 await child.mailbox.send(Question(text="What risks does this change introduce?"))
@@ -389,7 +389,7 @@ ID as an ordinary field in your application's message. Receive and close it with
 
 ```python
 replies = await runtime.mailboxes.create(config=MailboxConfig(message_type=str))
-child = await runtime.spawn(worker, mailbox=MailboxConfig(message_type=Question))
+child = await runtime.spawn_program(worker, mailbox=MailboxConfig(message_type=Question))
 await child.mailbox.send(Question(text="Review the risks", reply_to=replies.id))
 try:
     message = await replies.receive(timeout=30)

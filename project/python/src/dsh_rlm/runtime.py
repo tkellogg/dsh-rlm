@@ -109,7 +109,7 @@ class ProgramAgentHandle(AgentRef, Generic[T]):
         return await self.mailbox.send(body, mode=mode, timeout=timeout)
 
     def cancel(self, message: str | None = None) -> bool:
-        """Request cooperative cancellation of this agent's function task."""
+        """Request cooperative cancellation of this program agent task."""
         return self.task.cancel(message)
 
     def done(self) -> bool:
@@ -119,7 +119,7 @@ class ProgramAgentHandle(AgentRef, Generic[T]):
         return self.task.cancelled()
 
     async def wait(self) -> T:
-        """Wait for the function result, failure, or cancellation."""
+        """Wait for the program agent result, failure, or cancellation."""
         return await self.task
 
 
@@ -376,7 +376,7 @@ class Runtime(Generic[M]):
         name: str | None = None,
         model: str | None = None,
         thinking: str | None = None,
-    ) -> ProgramAgentHandle[str]:
+    ) -> AgentHandle[str]:
         raise UnsupportedOperationError("spawn_rlm is outside the pure-Python core")
 
     async def send(

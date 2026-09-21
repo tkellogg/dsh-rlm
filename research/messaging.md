@@ -54,7 +54,7 @@ See the [deadlock review](deadlocks.md) for circular waits and required checks.
 | `inject` | Add context for a later model step. | Do not wake it. |
 
 None of these interrupts running Python code or changes REPL variables directly.
-Ordinary programs receive messages without calling a model. Keep command output
+Program agents receive messages without calling a model. Keep command output
 and task-exit notices distinct from messages.
 
 ## Existing systems
