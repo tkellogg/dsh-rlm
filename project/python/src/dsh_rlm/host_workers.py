@@ -45,6 +45,9 @@ class HostWorkers:
     def inspect_outcomes(self)->tuple[dict[str,Any],...]:
         return tuple(dict(item) for item in self._runtime._host_worker_outcomes)
     async def spawn(self, entry: Callable[[Any],Awaitable[T]], *, name: str|None=None, timeout: float|None=None)->HostWorkerHandle[T]:
+        return await self._spawn_bound(entry, task_runtime=self._runtime, name=name, timeout=timeout)
+    async def _spawn_bound(self, entry: Callable[[Any],Awaitable[T]], *, task_runtime: Any, name: str|None=None, timeout: float|None=None)->HostWorkerHandle[T]:
+        """Admit authority from the owner but bind it to ``task_runtime`` exactly."""
         if not callable(entry): raise TypeError("entry must be an async callable")
         if name is not None and (not isinstance(name,str) or len(name)>256): raise ValueError("name must be a string of at most 256 characters")
         if timeout is not None and (isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not math.isfinite(timeout) or timeout<=0 or timeout>120): raise ValueError("timeout must be a finite number in (0, 120]")
@@ -84,9 +87,9 @@ class HostWorkers:
         started=asyncio.Event()
         async def run()->T:
             task=asyncio.current_task(); assert task is not None
-            _TASK_LEASES[task]=(runtime,lease); started.set()
+            _TASK_LEASES[task]=(task_runtime,lease); started.set()
             try:
-                value=entry(runtime)
+                value=entry(task_runtime)
                 if not inspect.isawaitable(value): raise TypeError("entry must return an awaitable")
                 if timeout is None: return await value
                 async with asyncio.timeout(float(timeout)): return await value

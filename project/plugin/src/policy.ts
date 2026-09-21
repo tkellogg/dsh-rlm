@@ -16,7 +16,7 @@ Discover tools with \`await runtime.tools.list()\`. Inspect a tool's input schem
 
 Make nested model calls with \`await runtime.models.complete(prompt, ...)\`. A completion returns a response; it does not run tools or inherit this conversation automatically. Give it the exact context and output contract it needs, and combine or verify its result in Python.
 
-Use \`await runtime.spawn_program(entry, ...)\` for a program agent: an async function at the agent root with no autonomous LLM loop. It can run continuously and use runtime messaging and the usual subagent APIs; cancellation is cooperative. Use model-backed subagents only when delegated work actually needs an LLM.
+Use \`await runtime.spawn_program(entry, ...)\` for a program agent: an async function at the agent root with no autonomous LLM loop. It can run continuously; when admitted from the active cell, its guarded tools, model calls, messaging, and usual subagent APIs keep fresh authority after the cell returns. Cancellation is cooperative. Use model-backed subagents only when delegated work actually needs an LLM.
 
 Treat external effects explicitly. Before an operation, identify whether it can change files, processes, network services, messages, or other outside state. After it runs, check the structured result and inspect the relevant outside state when correctness depends on the effect. After cancellation, transport failure, recovery, or an uncertain result, check whether the effect already happened before retrying. Do not infer success from intent or resend blindly.
 

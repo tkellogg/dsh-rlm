@@ -345,7 +345,32 @@ class Runtime(Generic[M]):
             _state=self._state,
             _parent_runtime=self,
         )
-        task: asyncio.Task[T] = loop.create_task(child._execute(entry), name=name)
+        # A program agent admitted from an active bridged RLM receives its own
+        # fresh, revocable host lease automatically.  The lease is bound to the
+        # exact program-agent task; raw asyncio descendants cannot use it.
+        scope = _HOST_CALLBACK_SCOPE.get()
+        if (
+            self._rlm
+            and self._host_worker_transport is not None
+            and _CURRENT_RUNTIME.get() is self
+            and scope is not None
+            and scope.active
+            and scope.state is self._state
+        ):
+            child._host_worker_transport = self._host_worker_transport
+            try:
+                worker = await self.host_workers._spawn_bound(
+                    lambda _child: child._execute(entry),
+                    task_runtime=child,
+                    name=name,
+                    timeout=None,
+                )
+            except BaseException:
+                child._finalize()
+                raise
+            task = worker.task
+        else:
+            task = loop.create_task(child._execute(entry), name=name)
         handle: ProgramAgentHandle[T] = ProgramAgentHandle(
             child.agent_id,
             child.name,

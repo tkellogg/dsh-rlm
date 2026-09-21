@@ -26,6 +26,53 @@ async def test_exact_task_only_and_release():
     gate.set(); assert (await h)["method"]=="tools.list"
     assert tx.released==[h.lease]
 
+
+@pytest.mark.asyncio
+async def test_program_agent_automatically_keeps_exact_task_host_authority():
+    from dsh_rlm.host_workers import HostWorkerLease
+
+    class Transport:
+        def __init__(self):
+            self.invoked = []
+            self.released = []
+
+        async def admit(self, parent, run, worker, lifetime):
+            return HostWorkerLease(run, worker, 1, "program-lease")
+
+        async def invoke(self, lease, method, params, timeout_ms=120000):
+            self.invoked.append((lease, method, params))
+            return {"method": method}
+
+        async def release(self, lease):
+            self.released.append(lease)
+            return True
+
+    root = Runtime(rlm=True)
+    transport = Transport()
+    root._host_worker_transport = transport
+    proceed = asyncio.Event()
+
+    async def program(child):
+        await proceed.wait()
+        descendant = asyncio.create_task(child.tools.list())
+        with pytest.raises(Exception):
+            await descendant
+        return await child.tools.list()
+
+    async def callback(*_args):
+        raise AssertionError("program agent must use its fresh lease")
+
+    async with root.bind():
+        async with root._bind_host_callbacks("creating-cell", callback):
+            handle = await root.spawn_program(program, name="host-capable-program")
+
+    proceed.set()
+    assert await handle.wait() == {"method": "tools.list"}
+    assert [item[1] for item in transport.invoked] == ["tools.list"]
+    assert len(transport.released) == 1
+    await root.close()
+
+
 @pytest.mark.asyncio
 async def test_admission_requires_active_cell():
     rt=Runtime(rlm=True); rt._host_worker_transport=FakeTransport()

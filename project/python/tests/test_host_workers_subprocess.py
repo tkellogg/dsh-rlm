@@ -48,6 +48,24 @@ def test_independent_worker_protocol_after_final_cell(tmp_path: Path):
  _w(p,{"id":"result","method":"execute","source":"await h"}); assert _r(p)["result"]["cell"]["ok"]
  _w(p,{"id":"close","method":"close"}); assert _r(p)["ok"]; assert p.wait(timeout=10)==0
 
+
+def test_program_agent_automatically_calls_host_after_creating_cell(tmp_path: Path):
+ p=_start(tmp_path/"program")
+ source="import asyncio\nasync def program(child):\n await asyncio.sleep(.02)\n return await child.tools.list()\nh=await runtime.spawn_program(program, name='program-agent')"
+ _w(p,{"id":"cell","method":"execute","capabilities":["host-callback-v1"],"source":source})
+ admit=_r(p); assert admit["kind"]=="worker_admit" and admit["parent_id"]=="cell"
+ lease={"run_id":admit["run_id"],"worker_id":admit["worker_id"],"generation":1,"admission_id":"program-nonce"}
+ _w(p,{"kind":"worker_admit_result","id":admit["id"],"ok":True,"lease":lease})
+ final=_r(p); assert final["id"]=="cell" and final["result"]["cell"]["ok"]
+ invoke=_r(p); assert invoke["kind"]=="worker_invoke" and invoke["method"]=="tools.list"
+ _w(p,{"kind":"worker_result","id":invoke["id"],"ok":True,"effect_id":"program-effect","result":[{"name":"send_message"}]})
+ release=_r(p); assert release["kind"]=="worker_release"
+ _w(p,{"kind":"worker_release_result","id":release["id"],"ok":True,"released":True})
+ _w(p,{"id":"result","method":"execute","source":"await h.wait()"})
+ result=_r(p); assert result["result"]["cell"]["ok"] and "send_message" in result["result"]["cell"]["display"]
+ _w(p,{"id":"close","method":"close"}); assert _r(p)["ok"]; assert p.wait(timeout=10)==0
+
+
 def test_worker_error_preserves_unknown_effect_metadata(tmp_path: Path):
  p=_start(tmp_path/"s")
  source="async def work(root):\n return await root.tools.list()\nh=await runtime.host_workers.spawn(work)"

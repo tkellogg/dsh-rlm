@@ -51,8 +51,14 @@ kill request implemented with task cancellation: the function receives
 `asyncio.CancelledError` at its next cancellation point and must not suppress it
 indefinitely. `handle.wait()`, `status()`, `done()`, and `cancelled()` expose the
 lifecycle. Closing the parent also cancels its live children and closes their
-mailboxes. Program agents are process-live only and are not restored or replayed
-after a crash.
+mailboxes. When spawned during an active bridged RLM cell, a program agent is
+automatically admitted for fresh post-cell Harness calls: `child.tools`,
+`child.models`, and permitted subagent tools continue to work after the creating
+cell returns. Authority is bound to the exact program-agent task, so a raw
+`asyncio.create_task()` descendant cannot borrow it. Every call rechecks the live
+owner and policy; completion or cancellation releases the lease. In the pure
+Python core, program agents remain local-only. Program agents are process-live
+and are not restored or replayed after a crash.
 
 ## Discover tools without expanding every schema
 
