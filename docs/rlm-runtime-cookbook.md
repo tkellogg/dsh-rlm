@@ -2,6 +2,58 @@
 
 These recipes describe the APIs in this source checkout. They do **not** imply that an already-running DSH host has been rebuilt or restarted.
 
+
+## Run a continuous non-RLM function agent
+
+An ordinary agent is an async function scheduled as a cooperative `asyncio.Task`.
+Pass the function to `runtime.spawn`; its argument is the child's isolated
+`Runtime`. The function may return promptly or keep running and receiving bounded
+messages until cancellation:
+
+```python
+from dsh_rlm import MailboxConfig
+
+replies = await runtime.mailboxes.create(
+    config=MailboxConfig(message_type=str, capacity=8)
+)
+
+async def echo_agent(child):
+    try:
+        while True:
+            message = await child.mailbox.receive()
+            await child.send(f"echo:{message.body}", to=replies)
+    finally:
+        # Release resources here. Cancellation is cooperative.
+        pass
+
+handle = await runtime.spawn(
+    echo_agent,
+    name="echo-agent",
+    mailbox=MailboxConfig(message_type=str, capacity=8),
+)
+
+await handle.send("hello")
+reply = await replies.receive(timeout=5)
+assert reply.body == "echo:hello"
+
+handle.cancel("no longer needed")
+try:
+    await handle.wait()
+except asyncio.CancelledError:
+    pass
+```
+
+`handle.send()` sends as the currently bound runtime and therefore must be called
+inside its owning runtime context (as `execute_python` is) or an explicit
+`async with runtime.bind()` block. The child can reply with `child.send(...)`;
+without `to=`, it sends to its parent mailbox. `handle.cancel()` is a cooperative
+kill request implemented with task cancellation: the function receives
+`asyncio.CancelledError` at its next cancellation point and must not suppress it
+indefinitely. `handle.wait()`, `status()`, `done()`, and `cancelled()` expose the
+lifecycle. Closing the parent also cancels its live children and closes their
+mailboxes. Ordinary agents are process-live only and are not restored or replayed
+after a crash.
+
 ## Discover tools without expanding every schema
 
 Keep the raw catalogue in Python, inspect a compact page, then select one exact entry only when needed:

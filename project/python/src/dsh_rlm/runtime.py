@@ -96,9 +96,31 @@ class AgentHandle(AgentRef, Generic[T]):
             return "unknown"
         if self.task.cancelled():
             return "cancelled"
-        if self.task.done():
-            return self._runtime._status
         return self._runtime._status
+
+    async def send(
+        self,
+        body: Any,
+        *,
+        mode: str | None = None,
+        timeout: float = 5.0,
+    ) -> SendReceipt:
+        """Send from the current runtime to this agent's mailbox."""
+        return await self.mailbox.send(body, mode=mode, timeout=timeout)
+
+    def cancel(self, message: str | None = None) -> bool:
+        """Request cooperative cancellation of this agent's function task."""
+        return self.task.cancel(message)
+
+    def done(self) -> bool:
+        return self.task.done()
+
+    def cancelled(self) -> bool:
+        return self.task.cancelled()
+
+    async def wait(self) -> T:
+        """Wait for the function result, failure, or cancellation."""
+        return await self.task
 
 
 class _RuntimeState:

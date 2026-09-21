@@ -52,6 +52,55 @@ async def test_current_runtime_is_task_local_and_spawn_does_not_wait_for_receive
 
 
 @pytest.mark.asyncio
+async def test_function_agent_runs_continuously_messages_both_ways_and_cancels():
+    root = Runtime()
+    replies = await root.mailboxes.create(
+        config=MailboxConfig(message_type=str, capacity=4)
+    )
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def echo_agent(rt):
+        started.set()
+        try:
+            while True:
+                message = await rt.mailbox.receive()
+                await rt.send(f"echo:{message.body}", to=replies)
+        finally:
+            stopped.set()
+
+    async with root.bind():
+        handle = await root.spawn(
+            echo_agent,
+            name="echo-agent",
+            mailbox=MailboxConfig(message_type=str, capacity=4),
+        )
+        await started.wait()
+        assert await handle.status() == "running"
+
+        first = await handle.send("one")
+        assert first.mailbox_id == handle.mailbox.id
+        assert (await replies.receive(timeout=1)).body == "echo:one"
+
+        await handle.send("two")
+        assert (await replies.receive(timeout=1)).body == "echo:two"
+        assert not handle.done()
+
+        assert handle.cancel("stop requested")
+        with pytest.raises(asyncio.CancelledError, match="stop requested"):
+            await handle.wait()
+        await asyncio.wait_for(stopped.wait(), 1)
+        assert handle.done()
+        assert handle.cancelled()
+        assert await handle.status() == "cancelled"
+
+        with pytest.raises(MailboxClosedError):
+            await handle.send("after-stop")
+
+    await root.close()
+
+
+@pytest.mark.asyncio
 async def test_native_cancellation_and_shielding():
     root = Runtime()
     entered = asyncio.Event()
