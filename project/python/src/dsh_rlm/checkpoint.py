@@ -176,11 +176,11 @@ def _runtime_types() -> tuple[type[Any], ...]:
     else:
         mailbox_types = (Mailbox, MailboxRef)
     try:
-        from .runtime import AgentHandle, AgentRef, Runtime
+        from .runtime import AgentRef, ProgramAgentHandle, Runtime
     except Exception:  # pragma: no cover - only relevant during partial imports
         runtime_types: tuple[type[Any], ...] = ()
     else:
-        runtime_types = (AgentHandle, AgentRef, Runtime)
+        runtime_types = (ProgramAgentHandle, AgentRef, Runtime)
 
     resource_types: list[type[Any]] = list(mailbox_types + runtime_types)
     # Process handles are not recoverable state.  They are imported here to

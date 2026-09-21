@@ -5,6 +5,7 @@ import pytest
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, field_validator
 
 from dsh_rlm import (
+    AgentHandle,
     MailboxClosedError,
     MailboxConfig,
     MailboxFullError,
@@ -24,6 +25,10 @@ from dsh_rlm import (
 async def send_as(runtime, body, **kwargs):
     async with runtime.bind():
         return await runtime.send(body, **kwargs)
+
+
+def test_agent_handle_compatibility_alias_is_program_agent_handle():
+    assert AgentHandle is ProgramAgentHandle
 
 
 @pytest.mark.asyncio
