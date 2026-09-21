@@ -1,5 +1,6 @@
 import asyncio
 import pytest
+from dsh_rlm import UnsupportedOperationError
 from dsh_rlm.runtime import Runtime
 from dsh_rlm.host_workers import HostWorkerError, HostWorkerLease
 
@@ -55,12 +56,15 @@ async def test_program_agent_automatically_keeps_exact_task_host_authority():
     async def program(child):
         await proceed.wait()
         descendant = asyncio.create_task(child.tools.list())
-        with pytest.raises(Exception):
+        with pytest.raises(UnsupportedOperationError, match="exact admitted program-agent task"):
             await descendant
         return await child.tools.list()
 
+    callback_calls = 0
     async def callback(*_args):
-        raise AssertionError("program agent must use its fresh lease")
+        nonlocal callback_calls
+        callback_calls += 1
+        return {"stale": True}
 
     async with root.bind():
         async with root._bind_host_callbacks("creating-cell", callback):
@@ -72,6 +76,7 @@ async def test_program_agent_automatically_keeps_exact_task_host_authority():
 
     assert [item[1] for item in transport.invoked] == ["tools.list"]
     assert len(transport.released) == 1
+    assert callback_calls == 0
     await root.close()
 
 

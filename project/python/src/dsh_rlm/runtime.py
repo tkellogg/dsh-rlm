@@ -384,8 +384,18 @@ class Runtime(Generic[M]):
             child,
         )
         child._handle = handle
+        if not self.authoritative:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            child._finalize()
+            raise MailboxClosedError(self.mailbox.id)
         self._children.add(child)
         task.add_done_callback(child._task_done)
+        if task.done():
+            # add_done_callback is scheduled, not invoked inline; avoid a stale
+            # completed child during that scheduling gap.
+            self._children.discard(child)
         return handle
 
     async def spawn(
