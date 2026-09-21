@@ -26,10 +26,18 @@ class _TaskLeaseBinding:
 
 _TASK_LEASE: contextvars.ContextVar[_TaskLeaseBinding|None] = contextvars.ContextVar("dsh_rlm_host_worker_lease", default=None)
 
-def worker_lease(runtime: Any)->HostWorkerLease|None:
+def worker_binding(runtime: Any)->tuple[HostWorkerLease|None,bool]:
+    """Return the exact lease and whether any worker context was inherited."""
     task=asyncio.current_task()
     binding=_TASK_LEASE.get()
-    return binding.lease if binding is not None and binding.runtime is runtime and binding.task is task else None
+    if binding is None:
+        return None,False
+    if binding.runtime is runtime and binding.task is task:
+        return binding.lease,True
+    return None,True
+
+def worker_lease(runtime: Any)->HostWorkerLease|None:
+    return worker_binding(runtime)[0]
 
 @dataclass(frozen=True, slots=True)
 class HostWorkerHandle(Generic[T]):

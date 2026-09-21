@@ -26,7 +26,7 @@ from .inspection import (
     TerminalRecordStore,
     page_managed_live_tasks,
 )
-from .host_workers import HostWorkers, worker_lease
+from .host_workers import HostWorkers, worker_binding
 from .mailbox import (
     Mailbox,
     MailboxConfig,
@@ -138,12 +138,16 @@ async def _invoke_host_callback(
 ) -> Any:
     # Worker authority is bound to the exact admitted asyncio task.  Context
     # inherited by a descendant never grants authority.
-    lease = worker_lease(runtime)
+    lease,inherited_worker_context = worker_binding(runtime)
     if lease is not None:
         transport = runtime._host_worker_transport
         if transport is None:
             raise UnsupportedOperationError("host worker transport is unavailable")
         return await transport.invoke(lease, method, params)
+    if inherited_worker_context:
+        raise UnsupportedOperationError(
+            f"{method} authority belongs to the exact admitted program-agent task"
+        )
     scope = _HOST_CALLBACK_SCOPE.get()
     if scope is None or scope.state is not runtime._state or not scope.active:
         raise UnsupportedOperationError(

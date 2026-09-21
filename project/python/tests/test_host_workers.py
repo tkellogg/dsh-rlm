@@ -65,9 +65,11 @@ async def test_program_agent_automatically_keeps_exact_task_host_authority():
     async with root.bind():
         async with root._bind_host_callbacks("creating-cell", callback):
             handle = await root.spawn_program(program, name="host-capable-program")
+            proceed.set()
+            # The raw descendant is denied even while the creating cell scope
+            # remains active; inherited worker context cannot fall back to it.
+            assert await handle.wait() == {"method": "tools.list"}
 
-    proceed.set()
-    assert await handle.wait() == {"method": "tools.list"}
     assert [item[1] for item in transport.invoked] == ["tools.list"]
     assert len(transport.released) == 1
     await root.close()
