@@ -82,6 +82,30 @@ This bundle targets the Web profile because that profile owns the
 `config`; another bundle that also replaces `agent-presets.config.roots` can
 conflict.
 
+## Optional Jev settings service
+
+The bundle registers the `jev` settings namespace through DSH's public settings
+API and `ctx.jev` through Cordis. It does not modify DSH core, the Web shell, or
+model-provider routing. The same service is used by `runtime.judge.judge(...)`.
+If the service is not mounted, bridge judge calls return `None`.
+
+Settings are live: enabled, model (`jev-latest`), timeout (10,000 ms), credential
+reference (`TYPESAFE_API_KEY`), and an advanced HTTPS endpoint root. The endpoint
+is trusted configuration: credentials and explicitly supplied state are sent to
+it. Plaintext URLs, embedded credentials, paths, queries, and fragments are
+rejected. The API path `/v1/systemone` is appended by the client.
+
+Actual keys belong to Harness credentials, not settings. They are resolved per
+operation; environment-backed values remain supported through the launch
+snapshot when no credentials provider is mounted. Status exposes only
+configured/source metadata, never the key. Disabled or missing-key judging
+makes no request. Disposing the service aborts its in-flight requests.
+
+The connection test sends only a fixed greeting-classification sample. It does
+not read conversations or runtime state, does not retry, and returns a redacted
+success/error summary. A successful test makes a real provider request and may
+incur a small charge; merely opening settings does not run it.
+
 ## Python controller API
 
 ```python

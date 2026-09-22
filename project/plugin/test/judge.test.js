@@ -30,3 +30,20 @@ test('invalid requests fail before fetch', async () => {
   const client=new JevClient({apiKey:'secret',fetch:async()=>{throw new Error('must not run')}})
   await assert.rejects(client.judge({state:{},questions:{}}), error => error instanceof JevError && error.code==='INVALID_REQUEST')
 })
+
+test('malformed answer never passes a connection check', async () => {
+  for (const route of [
+    {type:'choice'},
+    {type:'choice',choice:'unknown',probabilities:{act:1,ignore:0},confidence:1},
+    {type:'choice',choice:'act',probabilities:{act:2,ignore:0},confidence:1},
+    {type:'choice',choice:'act',probabilities:{act:1},confidence:1},
+  ]) {
+    const client=new JevClient({apiKey:'secret',fetch:async()=>Response.json({model:'jev-test',answers:{route,urgency:{type:'noul',noul:.5}}})})
+    await assert.rejects(client.judge(request),{code:'MALFORMED_RESPONSE'})
+  }
+})
+
+test('safeJudge does not conceal invalid caller input', async () => {
+  const client=new JevClient({apiKey:''})
+  await assert.rejects(client.safeJudge({state:{},questions:{}}),{code:'INVALID_REQUEST'})
+})

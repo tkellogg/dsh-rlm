@@ -202,6 +202,6 @@ Local `Runtime.send`/mailboxes are distinct from the guarded DSH orchestration t
 
 Jev is a structured judge, not a streaming text model. Use `await runtime.judge.judge(state, questions, safe=True)` from an active RLM cell or admitted program agent. Questions are keyed Choice, Score, or Noul objects.
 
-The host reads `TYPESAFE_API_KEY`; credentials never enter Python. Without a key the result is `None` and no request occurs. Configured failures raise unless `safe=True`, which converts operational failures to `None`. `None` means **no decision**, never rejection or false. State is explicit JSON; the runtime never exports its trajectory automatically.
+The host resolves `TYPESAFE_API_KEY` through Harness credentials (or the launch environment when no credentials service exists); credentials never enter Python. The optional shared `ctx.jev` service owns the live `jev` settings namespace. Disabling it or omitting the service makes runtime judging a no-op. Without a key the result is `None` and no request occurs. Configured failures raise unless `safe=True`, which converts operational failures to `None`. `None` means **no decision**, never rejection or false. State is explicit JSON; the runtime never exports its trajectory automatically.
 
 Jev is advisory only: never use it to grant permission, determine whether an effect occurred, suppress mandatory notices, or authorize retries. Defaults are `https://api.typesafe.ai/v1/systemone` and `jev-latest`.

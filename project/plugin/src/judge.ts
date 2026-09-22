@@ -33,7 +33,25 @@ function validateRequest(request: JudgeRequest): void {
 function validateResult(value: unknown, questions: Record<string,JudgeQuestion>): JudgeResult {
   if (!record(value) || typeof value.model !== 'string' || !record(value.answers)) throw new JevError('MALFORMED_RESPONSE','Jev returned an invalid response')
   const expected=Object.keys(questions); const actual=Object.keys(value.answers); if (actual.length !== expected.length || expected.some(id => !Object.hasOwn(value.answers as object,id))) throw new JevError('MALFORMED_RESPONSE','Jev response answer IDs do not match questions')
-  for (const id of expected) { const answer=(value.answers as Record<string,unknown>)[id]; const question=questions[id]; if (question === undefined || !record(answer) || answer.type !== question.type || !finiteJson(answer)) throw new JevError('MALFORMED_RESPONSE','Jev returned an invalid typed answer') }
+  const probability = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
+  const sameKeys = (v: unknown, keys: string[]): v is Record<string, unknown> => record(v) && Object.keys(v).length === keys.length && keys.every(key => Object.hasOwn(v, key))
+  const malformed = () => new JevError('MALFORMED_RESPONSE', 'Jev returned an invalid typed answer')
+  for (const id of expected) {
+    const answer = value.answers[id]
+    const question = questions[id]
+    if (question === undefined || !record(answer) || answer.type !== question.type || !finiteJson(answer)) throw malformed()
+    if (question.type === 'noul') {
+      if (!probability(answer.noul)) throw malformed()
+      continue
+    }
+    const keys = question.type === 'choice' ? Object.keys(question.criteria) : question.criteria.map((_, index) => String(index))
+    if (!probability(answer.confidence) || !sameKeys(answer.probabilities, keys) || !Object.values(answer.probabilities).every(probability)) throw malformed()
+    if (question.type === 'choice') {
+      if (typeof answer.choice !== 'string' || !Object.hasOwn(question.criteria, answer.choice)) throw malformed()
+    } else {
+      if (typeof answer.score !== 'number' || !Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !sameKeys(answer.legend, keys)) throw malformed()
+    }
+  }
   const usage=record(value.usage) && Number.isSafeInteger(value.usage.input_tokens) && Number.isSafeInteger(value.usage.output_tokens) ? {input_tokens:value.usage.input_tokens as number,output_tokens:value.usage.output_tokens as number}:undefined
   return {model:value.model,answers:value.answers as Record<string,JsonValue>,...(usage===undefined?{}:{usage})}
 }
@@ -48,8 +66,13 @@ export class JevClient {
     try { response=await (this.config.fetch ?? fetch)(`${base}/v1/systemone`,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({state:request.state,model:request.model ?? this.config.model ?? 'jev-latest',questions:request.questions}),signal:fused,redirect:'error'}) }
     catch(error) { if (signal?.aborted) throw new JevError('ABORTED','Jev call aborted'); if (timeoutSignal.aborted) throw new JevError('TIMEOUT','Jev call timed out'); throw new JevError('TRANSPORT','Jev transport failed') }
     if (!response.ok) { const code=response.status===401||response.status===403?'AUTH':response.status===429?'RATE_LIMIT':response.status>=500?'SERVER':'TRANSPORT'; throw new JevError(code,'Jev request failed',response.status) }
-    let value:unknown; try { value=await response.json() } catch { throw new JevError('MALFORMED_RESPONSE','Jev returned invalid JSON') }
+    let value:unknown; try { value=await response.json() } catch {
+      if (signal?.aborted) throw new JevError('ABORTED','Jev call aborted')
+      if (timeoutSignal.aborted) throw new JevError('TIMEOUT','Jev call timed out')
+      throw new JevError('MALFORMED_RESPONSE','Jev returned invalid JSON')
+    }
+    if (signal?.aborted) throw new JevError('ABORTED','Jev call aborted')
     return validateResult(value,request.questions)
   }
-  async safeJudge(request: JudgeRequest, signal?: AbortSignal): Promise<JudgeResult|null> { try { return await this.judge(request,signal) } catch(error) { if (signal?.aborted) throw error; return null } }
+  async safeJudge(request: JudgeRequest, signal?: AbortSignal): Promise<JudgeResult|null> { try { return await this.judge(request,signal) } catch(error) { if (signal?.aborted || !(error instanceof JevError) || error.code === 'INVALID_REQUEST' || error.code === 'ABORTED') throw error; return null } }
 }

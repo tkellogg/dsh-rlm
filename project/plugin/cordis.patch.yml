@@ -2,6 +2,10 @@
 # shipped or user-authored preset roots. The provider resolves from import.meta.url
 # after installation instead of assuming where the consuming profile lives.
 - insert:
+    - id: dsh-jev
+      name: ./lib/jev-service.js
+    - id: dsh-jev-remote
+      name: ./lib/jev-remote.js
     - id: dsh-rlm-preset-root
       name: ./lib/preset-root.js
 

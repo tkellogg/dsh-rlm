@@ -10,7 +10,11 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./cordis.patch.yml": "./cordis.patch.yml"
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./jev": {
+      "types": "./lib/jev-service.d.ts",
+      "default": "./lib/jev-service.js"
+    }
   },
   "files": [
     "lib/**/*.js",
@@ -32,10 +36,17 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-agent-presets": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-api-gateway": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-launch-environment": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-llm": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-settings": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-subprocess": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-system-prompt": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-tools": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-typert-registry": "^0.1.6-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
     "@types/node": "22.18.12",
     "js-yaml": "^4.3.2",
     "typescript": "5.9.3"
@@ -49,12 +60,19 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-agent-presets": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-credentials": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-launch-environment": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-llm": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-settings": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-subprocess": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-system-prompt": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-tools": "0.1.6-alpha.2"
+    "@deepseek-ai/dsh-tools": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.1.6-alpha.2"
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.2"
   }
 }
