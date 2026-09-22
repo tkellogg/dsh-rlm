@@ -1,6 +1,8 @@
 # Source-checkout profile patch. Its base URL is profile/, so the provider's
 # relative module path differs from the package-root bundle patch.
 - insert:
+    - id: dsh-jev-settings
+      name: ../../client/lib/index.js
     - id: dsh-jev
       name: ../lib/jev-service.js
     - id: dsh-jev-remote

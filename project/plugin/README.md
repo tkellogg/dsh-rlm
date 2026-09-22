@@ -82,6 +82,28 @@ This bundle targets the Web profile because that profile owns the
 `config`; another bundle that also replaces `agent-presets.config.roots` can
 conflict.
 
+## Jev settings page (plugin-only)
+
+Build the separate browser package before using the source-checkout profile:
+
+```sh
+cd project/client
+npm ci
+npm run build
+npm test
+```
+
+The source profile mounts its Host entry, which DSH discovers through the package's
+`dsh.client` metadata and `./client` export. Open **Settings → Jev Judge** after
+restarting the existing Host with the updated profile and refreshing the page.
+No changes to DSH core or the Web shell are required. Do not start a second server
+and expect it to update an existing GUI.
+
+For a packed/published installation, install **both** `@dsh-rlm/plugin` (Host bundle)
+and `@dsh-rlm/jev-settings` (browser plugin) through the normal plugin manager.
+The browser package is separate so headless installations do not need UI code.
+Neither package has been published by this checkout's build process.
+
 ## Optional Jev settings service
 
 The bundle registers the `jev` settings namespace through DSH's public settings

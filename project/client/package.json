@@ -1,0 +1,44 @@
+{
+  "name": "@dsh-rlm/jev-settings",
+  "version": "0.1.0",
+  "description": "Jev Judge settings UI for DeepSeek Harness",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "README.md"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "external": [
+        "react",
+        "react/jsx-runtime",
+        "@deepseek-ai/dsh-client-store"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.2"
+  }
+}
