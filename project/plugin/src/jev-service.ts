@@ -68,10 +68,24 @@ export class JevService extends Service {
     })
   }
 
-  async status(): Promise<JevStatus> {
+  private async credentialOperation<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const timeout = AbortSignal.timeout(this._current().timeoutMs)
+    const fused = AbortSignal.any([this._lifetime.signal, timeout, ...(signal ? [signal] : [])])
+    const abortError = () => new JevError(timeout.aborted ? 'TIMEOUT' : 'ABORTED', 'Jev credential operation interrupted')
+    if (fused.aborted) throw abortError()
+    let onAbort!: () => void
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation).catch(() => { throw new JevError('AUTH', 'Jev credentials are unavailable') }),
+        new Promise<never>((_, reject) => { onAbort = () => reject(abortError()); fused.addEventListener('abort', onAbort, { once: true }) }),
+      ])
+    } finally { fused.removeEventListener('abort', onAbort) }
+  }
+
+  async status(signal?: AbortSignal): Promise<JevStatus> {
     const config = this._current()
     const credentials = this.ctx.get('credentials')
-    const info = credentials === undefined ? undefined : await credentials.describe(credentialRef(config.apiKeyEnv))
+    const info = credentials === undefined ? undefined : await this.credentialOperation(() => credentials.describe(credentialRef(config.apiKeyEnv)), signal)
     const ambient = credentials === undefined ? launchEnvironmentOf(this.ctx).get(config.apiKeyEnv) : undefined
     const configured = info?.configured ?? Boolean(ambient?.value.trim())
     return {
@@ -90,9 +104,10 @@ export class JevService extends Service {
     const credentials = this.ctx.get('credentials')
     const key = credentials === undefined
       ? launchEnvironmentOf(this.ctx).get(config.apiKeyEnv)?.value
-      : (await credentials.resolve(credentialRef(config.apiKeyEnv)))?.value
+      : (await this.credentialOperation(() => credentials.resolve(credentialRef(config.apiKeyEnv)), fused))?.value
     fused.throwIfAborted()
-    if (!this._current().enabled) return null
+    const latest = this._current()
+    if (!latest.enabled || JSON.stringify(latest) !== JSON.stringify(config)) return null
     // An explicit blank prevents the standalone client's process.env fallback.
     const client = new JevClient({ apiKey: key ?? '', model: config.model, timeoutMs: config.timeoutMs,
       baseURL: config.baseURL, ...(this._fetch === undefined ? {} : { fetch: this._fetch }) })
@@ -112,7 +127,7 @@ export class JevService extends Service {
     if (this._testing) return { ok: false, code: 'BUSY', message: 'A connection test is already running.' }
     this._testing = true
     try {
-      const status = await this.status()
+      const status = await this.status(signal)
       if (status.state !== 'configured') return { ok: false, code: status.state, message: status.state === 'disabled' ? 'Jev is disabled.' : 'No API key is configured.' }
       const result = await this.judge({ state: { purpose: 'Jev connection test', word: 'hello' }, questions: {
         greeting: { type: 'choice', instructions: 'Classify the word.', criteria: { greeting: 'A greeting', other: 'Anything else' } },
@@ -120,6 +135,7 @@ export class JevService extends Service {
       return result === null ? { ok: false, code: 'NOT_CONFIGURED', message: 'No judge decision is available.' }
         : { ok: true, code: 'OK', message: 'Jev returned a structured answer. Connection verified.' }
     } catch (error) {
+      if (signal?.aborted || this._lifetime.signal.aborted || (error instanceof JevError && error.code === 'ABORTED')) throw new JevError('ABORTED', 'Jev call aborted')
       // Never echo provider text, request state, credentials, or arbitrary error messages.
       return { ok: false, code: error instanceof JevError ? error.code : 'UNAVAILABLE', message: 'Connection test failed. Check the credential, endpoint, and network.' }
     } finally { this._testing = false }

@@ -14,8 +14,8 @@ export class JevRemote extends TypertRemoteService {
   constructor(ctx: Context) { super(ctx, 'jevRemote', { namespace: 'jev' }) }
 
   @Remote
-  async status(): Promise<JevStatus> {
-    return await this.ctx.jev.status()
+  async status(signal: AbortSignal): Promise<JevStatus> {
+    return await this.ctx.jev.status(signal)
   }
 
   @Remote

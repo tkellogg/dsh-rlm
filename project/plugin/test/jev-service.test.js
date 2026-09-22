@@ -214,3 +214,42 @@ test('trusted launch fallback is used only when credentials provider is absent',
     assert.equal(calls.length,1)
   } finally { await credentials?.dispose(); await fork.dispose() }
 })
+
+test('credential exceptions are redacted for judge and status', async () => {
+  const {ctx,fork}=await fixture()
+  try {
+    ctx.credentials.resolve=async()=>{throw new Error('secret-token-private')}
+    ctx.credentials.describe=async()=>{throw new Error('secret-token-private')}
+    for (const operation of [()=>ctx.jev.judge(request),()=>ctx.jev.status()]) {
+      await assert.rejects(operation(),error=>error.code==='AUTH'&&!String(error).includes('secret-token'))
+    }
+    assert.equal(await ctx.jev.safeJudge(request),null)
+  } finally {await fork.dispose()}
+})
+
+test('pending credential inspection cancels and test busy state clears', async () => {
+  const {ctx,fork}=await fixture()
+  try {
+    ctx.credentials.describe=()=>new Promise(()=>{})
+    const control=new AbortController()
+    const pending=ctx.jev.testConnection(control.signal)
+    control.abort()
+    await assert.rejects(pending,{code:'ABORTED'})
+    ctx.credentials.describe=async()=>({configured:false,writable:true})
+    assert.equal((await ctx.jev.testConnection()).code,'not-configured')
+  } finally {await fork.dispose()}
+})
+
+test('changed endpoint during credential resolution does not send stale credentials', async () => {
+  const {ctx,calls,fork}=await fixture()
+  let release
+  ctx.credentials.resolve=()=>new Promise(resolve=>{release=resolve})
+  try {
+    const pending=ctx.jev.judge(request)
+    await turn()
+    await ctx.settings.update('jev',{baseURL:'https://other.example'})
+    release({value:'secret',source:'file'})
+    assert.equal(await pending,null)
+    assert.equal(calls.length,0)
+  } finally {await fork.dispose()}
+})

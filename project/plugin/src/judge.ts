@@ -32,7 +32,7 @@ function validateRequest(request: JudgeRequest): void {
   if (request.timeout_ms !== undefined && (!Number.isSafeInteger(request.timeout_ms) || request.timeout_ms <= 0 || request.timeout_ms > 120000)) throw new JevError('INVALID_REQUEST','timeout_ms must be in 1..120000')
 }
 function validateResult(value: unknown, questions: Record<string,JudgeQuestion>): JudgeResult {
-  if (!record(value) || typeof value.model !== 'string' || !record(value.answers)) throw new JevError('MALFORMED_RESPONSE','Jev returned an invalid response')
+  if (!record(value) || typeof value.model !== 'string' || value.model.length === 0 || value.model.length > 256 || !record(value.answers)) throw new JevError('MALFORMED_RESPONSE','Jev returned an invalid response')
   const expected=Object.keys(questions); const actual=Object.keys(value.answers); if (actual.length !== expected.length || expected.some(id => !Object.hasOwn(value.answers as object,id))) throw new JevError('MALFORMED_RESPONSE','Jev response answer IDs do not match questions')
   const probability = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
   const sameKeys = (v: unknown, keys: string[]): v is Record<string, unknown> => record(v) && Object.keys(v).length === keys.length && keys.every(key => Object.hasOwn(v, key))
@@ -53,7 +53,8 @@ function validateResult(value: unknown, questions: Record<string,JudgeQuestion>)
       if (typeof answer.score !== 'number' || !Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !sameKeys(answer.legend, keys)) throw malformed()
     }
   }
-  const usage=record(value.usage) && Number.isSafeInteger(value.usage.input_tokens) && Number.isSafeInteger(value.usage.output_tokens) ? {input_tokens:value.usage.input_tokens as number,output_tokens:value.usage.output_tokens as number}:undefined
+  if (value.usage !== undefined && (!record(value.usage) || Object.keys(value.usage).length !== 2 || !Number.isSafeInteger(value.usage.input_tokens) || !Number.isSafeInteger(value.usage.output_tokens) || (value.usage.input_tokens as number) < 0 || (value.usage.output_tokens as number) < 0)) throw new JevError('MALFORMED_RESPONSE', 'Jev returned invalid usage')
+  const usage = value.usage as JudgeResult['usage']
   return {model:value.model,answers:value.answers as Record<string,JsonValue>,...(usage===undefined?{}:{usage})}
 }
 export class JevClient {
