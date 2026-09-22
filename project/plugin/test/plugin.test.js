@@ -5,8 +5,10 @@ import { BridgePool, outsideBridgeCallbackScope, sanitizeAgentId } from '../lib/
 import { apply } from '../lib/index.js'
 import { createHostCallbackDispatcher, createHostCallbackExecution } from '../lib/host-callbacks.js'
 import { isRlmAgent } from '../lib/policy.js'
+import { renderResult } from '../lib/render-result.js'
 
 const result = (source, recovery_notice = null) => ({
+  execution: { status: 'executed', reason: null },
   cell: {
     ok: true,
     stdout: '',
@@ -126,6 +128,53 @@ test('one persistent process per agent and serialized calls', async () => {
   assert.deepEqual(subprocess.spawns[0].spec.stdio, {
     stdin: 'pipe', stdout: 'pipe', stderr: { maxBytes: 65536 },
   })
+  await pool.dispose()
+})
+
+test('recovery gate is explicit, concise, and the following request executes', async () => {
+  let calls = 0
+  const subprocess = new FakeSubprocess((request, handle) => {
+    if (request.method === 'close') {
+      handle.send({ id: request.id, ok: true, result: { closed: true } })
+      return
+    }
+    calls += 1
+    if (calls === 1) {
+      handle.send({ id: request.id, ok: true, result: {
+        execution: { status: 'not_executed', reason: 'recovery_gate' },
+        cell: null,
+        checkpoint: null,
+        recovery_notice: '<runtime_recovery>Python runtime restored; inspect runtime.recovery.</runtime_recovery>',
+      } })
+      return
+    }
+    handle.send({ id: request.id, ok: true, result: result(request.source) })
+  })
+  const pool = new BridgePool(subprocess)
+  const first = await pool.execute('agent', 'side_effect = True', new AbortController().signal)
+  assert.deepEqual(first.execution, { status: 'not_executed', reason: 'recovery_gate' })
+  assert.equal(first.cell, null)
+  const rendered = renderResult(first)
+  assert.match(rendered, /Python cell was not executed \(recovery_gate\)/)
+  assert.doesNotMatch(rendered, /completed successfully|stdout:/)
+  const second = await pool.execute('agent', 'side_effect = True', new AbortController().signal)
+  assert.deepEqual(second.execution, { status: 'executed', reason: null })
+  assert.equal(second.cell.display, 'side_effect = True')
+  assert.equal(calls, 2)
+  await pool.dispose()
+})
+
+test('execute result validator rejects recovery status/cell mismatches', async () => {
+  const subprocess = new FakeSubprocess((request, handle) => {
+    if (request.method === 'close') return handle.send({ id: request.id, ok: true, result: { closed: true } })
+    handle.send({ id: request.id, ok: true, result: {
+      execution: { status: 'not_executed', reason: 'recovery_gate' },
+      cell: { ok: true, stdout: '', stderr: '', display: null, error_type: null, error_message: null, traceback: null },
+      checkpoint: null, recovery_notice: 'gate',
+    } })
+  })
+  const pool = new BridgePool(subprocess)
+  await assert.rejects(pool.execute('agent', 'must not pass', new AbortController().signal), /invalid execute result/)
   await pool.dispose()
 })
 

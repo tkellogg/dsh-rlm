@@ -49,7 +49,10 @@ $DSH_RLM_PYTHON -m dsh_rlm.bridge --session-dir <state-root>/<hashed-agent-id>
 
 The directory name uses the full SHA-256 digest of the raw agent ID. Calls for one DSH agent are serialized. Different root agents use different
 processes. Aborting `execute_python` terminates that agent's process. The next
-call restores the last good checkpoint and returns a mandatory recovery notice.
+call restores the last good checkpoint. Its first submitted cell returns a structured
+`execution` outcome with `status: "not_executed"` and `reason: "recovery_gate"`; the
+source did not run. The concise notice points to Python `runtime.recovery` for
+detailed restored/skipped/failed inventories. The following call executes normally.
 
 ## Run from this checkout
 
@@ -174,6 +177,10 @@ uncertain terminal outcomes, but not a crash-durable effect ledger.
 execute_python({ source: "counter = globals().get('counter', 0) + 1\ncounter" })
 ```
 
-The structured result contains `cell`, `checkpoint`, and `recovery_notice`.
-Python exceptions are returned in `cell`. Bridge, framing, and host lifecycle
-failures fail the DSH tool call explicitly.
+The structured result contains `execution`, nullable `cell`, `checkpoint`, and
+`recovery_notice`. A recovery gate has `execution.status: "not_executed"`,
+`execution.reason: "recovery_gate"`, and `cell: null`; it is not an executed success.
+The rendered result explicitly says the Python cell was not executed. Inspect
+`runtime.recovery` in a subsequent Python cell for detailed inventories. Python
+exceptions are returned in `cell`. Bridge, framing, and host lifecycle failures
+fail the DSH tool call explicitly.

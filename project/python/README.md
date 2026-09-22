@@ -37,9 +37,12 @@ finally:
 ```
 
 A successful cell is checkpointed. A failed cell does not replace the last good
-checkpoint. After interruption, a new kernel restores each recoverable value
-independently and emits a one-shot `<runtime_recovery>` notice. Old tasks,
-mailboxes, handles, host callback leases, and external effects never revive.
+checkpoint. After restart, a new kernel restores each recoverable value
+independently. `runtime.recovery` exposes bounded restored/skipped/failed
+inventories for explicit inspection, while the routine notice remains concise.
+The bridge gates the first submitted cell with `execution.status = "not_executed"`
+and `reason = "recovery_gate"`; that source did not run. Old tasks, mailboxes,
+handles, host callback leases, and external effects never revive.
 
 Checkpoint files use `dill`. Load only session directories controlled by the
 local user because a malicious checkpoint can execute code while loading.

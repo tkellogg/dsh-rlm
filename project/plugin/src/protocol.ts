@@ -36,8 +36,14 @@ export interface CheckpointResult {
   error: string | null
 }
 
+export interface ExecutionOutcome {
+  status: 'executed' | 'not_executed'
+  reason: 'recovery_gate' | null
+}
+
 export interface ExecuteResult {
-  cell: CellResult
+  execution: ExecutionOutcome
+  cell: CellResult | null
   checkpoint: CheckpointResult | null
   recovery_notice: string | null
 }
@@ -163,11 +169,22 @@ function isCheckpointResult(value: unknown): value is CheckpointResult {
     && isNullableString(value.error)
 }
 
-export function isExecuteResult(value: unknown): value is ExecuteResult {
+function isExecutionOutcome(value: unknown): value is ExecutionOutcome {
   return isRecord(value)
-    && isCellResult(value.cell)
-    && (value.checkpoint === null || isCheckpointResult(value.checkpoint))
-    && isNullableString(value.recovery_notice)
+    && (value.status === 'executed' || value.status === 'not_executed')
+    && (value.reason === null || value.reason === 'recovery_gate')
+    && ((value.status === 'executed' && value.reason === null)
+      || (value.status === 'not_executed' && value.reason === 'recovery_gate'))
+}
+
+export function isExecuteResult(value: unknown): value is ExecuteResult {
+  if (!isRecord(value) || !isExecutionOutcome(value.execution)
+    || !isNullableString(value.recovery_notice)) return false
+  if (value.execution.status === 'executed') {
+    return isCellResult(value.cell)
+      && (value.checkpoint === null || isCheckpointResult(value.checkpoint))
+  }
+  return value.cell === null && value.checkpoint === null && value.recovery_notice !== null
 }
 
 export function isCloseResult(value: unknown): value is { closed: true } {

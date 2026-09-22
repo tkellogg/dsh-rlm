@@ -43,6 +43,7 @@ test('installed pruner preserves recovery prefix and nonrecoverable checkpoint t
   const noticeError = 'CHECKPOINT FAILURE: disk write rejected.'
   const skipped = 'NONRECOVERABLE WARNING: live_socket cannot be serialized.'
   const rendered = renderResult({
+    execution: { status: 'executed', reason: null },
     recovery_notice: recovery,
     cell: { ok: true, stdout: 'x'.repeat(12000), stderr: '', display: null,
       error_type: null, error_message: null, traceback: null },

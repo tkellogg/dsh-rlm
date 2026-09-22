@@ -171,12 +171,15 @@ def test_abrupt_exit_restores_checkpoint_and_reports_once(tmp_path: Path) -> Non
             "source": "should_not_run = True\ndurable",
         },
     )
-    assert recovered["result"]["cell"]["display"] is None
-    assert recovered["result"]["checkpoint"] is None
-    notice = recovered["result"]["recovery_notice"]
+    gate = recovered["result"]
+    assert gate["execution"] == {"status": "not_executed", "reason": "recovery_gate"}
+    assert gate["cell"] is None
+    assert gate["checkpoint"] is None
+    notice = gate["recovery_notice"]
     assert notice is not None
-    assert "Previous run was interrupted" in notice
-    assert "Prior tasks, mailboxes, and handles are invalid" in notice
+    assert "submitted cell was not executed" not in notice
+    assert "runtime.recovery" in notice
+    assert "should_not_run" not in recovered["result"]
 
     next_response = _send(
         restarted,
@@ -186,6 +189,7 @@ def test_abrupt_exit_restores_checkpoint_and_reports_once(tmp_path: Path) -> Non
             "source": "('should_not_run' in globals(), durable + 1)",
         },
     )
+    assert next_response["result"]["execution"] == {"status": "executed", "reason": None}
     assert next_response["result"]["cell"]["display"] == "(False, 43)"
     assert next_response["result"]["recovery_notice"] is None
     assert _close(restarted)["ok"] is True

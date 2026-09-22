@@ -897,11 +897,15 @@ async def serve(
             # can run.  The following execute may reconsider and proceed.
             recovery_notice = kernel.take_recovery_notice()
             if recovery_notice is not None:
+                # This is a protocol-successful recovery gate, not a Python
+                # execution.  Keep the cell absent so no consumer can mistake
+                # the response for an executed (empty) successful cell.
                 response = {
                     "id": request.id,
                     "ok": True,
                     "result": {
-                        "cell": _cell_summary(CellResult(stdout="", stderr="")),
+                        "execution": {"status": "not_executed", "reason": "recovery_gate"},
+                        "cell": None,
                         "checkpoint": None,
                         "recovery_notice": recovery_notice,
                     },
@@ -947,6 +951,7 @@ async def serve(
                     "id": request.id,
                     "ok": True,
                     "result": {
+                        "execution": {"status": "executed", "reason": None},
                         "cell": _cell_summary(result),
                         "checkpoint": checkpoint,
                         "recovery_notice": recovery_notice,

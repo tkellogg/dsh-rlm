@@ -49,23 +49,34 @@ const checkpoint = {
   additionalProperties: false,
 } as const
 
+const execution = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['executed', 'not_executed'], required: true },
+    reason: { oneOf: [{ type: 'string', enum: ['recovery_gate'] }, { type: 'null' }], required: true },
+  },
+  additionalProperties: false,
+} as const
+
+const executeCell = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean', required: true },
+    stdout: { type: 'string', required: true },
+    stderr: { type: 'string', required: true },
+    display: { ...nullableString, required: true },
+    error_type: { ...nullableString, required: true },
+    error_message: { ...nullableString, required: true },
+    traceback: { ...nullableString, required: true },
+  },
+  additionalProperties: false,
+} as const
+
 const executeOutput = {
   type: 'object',
   properties: {
-    cell: {
-      type: 'object',
-      properties: {
-        ok: { type: 'boolean', required: true },
-        stdout: { type: 'string', required: true },
-        stderr: { type: 'string', required: true },
-        display: { ...nullableString, required: true },
-        error_type: { ...nullableString, required: true },
-        error_message: { ...nullableString, required: true },
-        traceback: { ...nullableString, required: true },
-      },
-      additionalProperties: false,
-      required: true,
-    },
+    execution: { ...execution, required: true },
+    cell: { oneOf: [executeCell, { type: 'null' }], required: true },
     checkpoint: {
       oneOf: [checkpoint, { type: 'null' }],
       required: true,
@@ -126,4 +137,4 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 }
 
-export type { CellResult, CheckpointResult, ExecuteResult, ValueIssue } from './protocol.js'
+export type { CellResult, CheckpointResult, ExecuteResult, ExecutionOutcome, ValueIssue } from './protocol.js'

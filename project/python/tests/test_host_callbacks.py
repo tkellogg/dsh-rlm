@@ -195,7 +195,10 @@ def test_eof_during_callback_marks_run_interrupted(tmp_path: Path) -> None:
     resumed = _start(session_dir)
     _write(resumed, {"id": "recover", "method": "execute", "source": "42"})
     response = _read(resumed)
-    assert "Previous run was interrupted" in response["result"]["recovery_notice"]
+    assert response["result"]["execution"] == {"status": "not_executed", "reason": "recovery_gate"}
+    assert response["result"]["cell"] is None
+    assert "unclean shutdown" in response["result"]["recovery_notice"]
+    assert "submitted cell was not executed" not in response["result"]["recovery_notice"]
     _close(resumed)
 
 
