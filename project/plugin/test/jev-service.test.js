@@ -190,3 +190,27 @@ test('browser RPC envelope reaches the plugin through public Connection intercep
     assert.equal((await intercept.handler('jev/status',{},signal)).ok,false)
   } finally { await remote.dispose(); await gateway.dispose(); await registry.dispose(); await connection.dispose(); await fork.dispose() }
 })
+
+test('trusted launch fallback is used only when credentials provider is absent', async () => {
+  const {createLaunchEnvironmentSnapshot}=await import('@deepseek-ai/dsh-launch-environment')
+  const ctx=new Context()
+  ctx.provide('launchEnvironment')
+  ctx.set('launchEnvironment',createLaunchEnvironmentSnapshot([{source:'process',values:{TYPESAFE_API_KEY:'ambient-secret'}}]))
+  const calls=[]
+  const fork=ctx.plugin(context=>{ new JevService(context,{},async(_url,init)=>{
+    calls.push(init.headers.Authorization)
+    return Response.json({model:'jev-test',answers:{greeting:{type:'choice',choice:'greeting',confidence:1,probabilities:{greeting:1,other:0}}}})
+  }) })
+  await turn()
+  let credentials
+  try {
+    assert.equal((await ctx.jev.status()).credentialSource,'process')
+    await ctx.jev.judge(request)
+    assert.deepEqual(calls,['Bearer ambient-secret'])
+    credentials=ctx.plugin(MemoryCredentials)
+    await turn()
+    assert.equal((await ctx.jev.status()).state,'not-configured')
+    assert.equal(await ctx.jev.judge(request),null)
+    assert.equal(calls.length,1)
+  } finally { await credentials?.dispose(); await fork.dispose() }
+})

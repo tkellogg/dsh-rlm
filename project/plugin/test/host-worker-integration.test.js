@@ -82,7 +82,8 @@ function outerFor(agent) {
 async function waitForWorker(pool, execution) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const probe = await deadline(pool.execute('integration-agent', "globals().get('_worker_observation', None)", new AbortController().signal, execution), 2_000, 'worker probe')
-    if (probe.cell.display !== 'None') return probe.cell.display
+    assert.equal(probe.cell.ok, true, probe.cell.error_message ?? 'worker observation probe failed')
+    if (probe.cell.display !== null && probe.cell.display !== 'None') return probe.cell.display
     await new Promise(resolveWait => setTimeout(resolveWait, 25))
   }
   throw new Error('worker did not publish an observation')

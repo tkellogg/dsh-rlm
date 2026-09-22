@@ -28,6 +28,7 @@ function validateRequest(request: JudgeRequest): void {
     if (q.type === 'score' && (!Array.isArray(q.criteria) || q.criteria.length < 2 || q.criteria.length > 10)) throw new JevError('INVALID_REQUEST','score requires 2..10 criteria')
     if (!finiteJson(q)) throw new JevError('INVALID_REQUEST','question must be bounded JSON')
   }
+  if (Buffer.byteLength(JSON.stringify({ state: request.state, questions: request.questions }), 'utf8') > 262144) throw new JevError('INVALID_REQUEST', 'Jev state and questions exceed 256 KiB')
   if (request.timeout_ms !== undefined && (!Number.isSafeInteger(request.timeout_ms) || request.timeout_ms <= 0 || request.timeout_ms > 120000)) throw new JevError('INVALID_REQUEST','timeout_ms must be in 1..120000')
 }
 function validateResult(value: unknown, questions: Record<string,JudgeQuestion>): JudgeResult {
@@ -56,17 +57,37 @@ function validateResult(value: unknown, questions: Record<string,JudgeQuestion>)
   return {model:value.model,answers:value.answers as Record<string,JsonValue>,...(usage===undefined?{}:{usage})}
 }
 export class JevClient {
-  constructor(private readonly config: JevClientConfig={}) {}
-  get available(): boolean { return Boolean((this.config.apiKey ?? process.env[this.config.apiKeyEnv ?? 'TYPESAFE_API_KEY'])?.trim()) }
+  readonly #config: JevClientConfig
+  constructor(config: JevClientConfig={}) { this.#config = { ...config } }
+  get available(): boolean { return Boolean((this.#config.apiKey ?? process.env[this.#config.apiKeyEnv ?? 'TYPESAFE_API_KEY'])?.trim()) }
   async judge(request: JudgeRequest, signal?: AbortSignal): Promise<JudgeResult|null> {
+    if (signal?.aborted) throw new JevError('ABORTED', 'Jev call aborted')
     validateRequest(request)
-    const key=(this.config.apiKey ?? process.env[this.config.apiKeyEnv ?? 'TYPESAFE_API_KEY'])?.trim(); if (!key) return null
-    const timeout=request.timeout_ms ?? this.config.timeoutMs ?? 10000; const timeoutSignal=AbortSignal.timeout(timeout); const fused=signal===undefined?timeoutSignal:AbortSignal.any([signal,timeoutSignal])
-    const base=(this.config.baseURL ?? 'https://api.typesafe.ai').replace(/\/$/,''); let response:Response
-    try { response=await (this.config.fetch ?? fetch)(`${base}/v1/systemone`,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({state:request.state,model:request.model ?? this.config.model ?? 'jev-latest',questions:request.questions}),signal:fused,redirect:'error'}) }
+    const key=(this.#config.apiKey ?? process.env[this.#config.apiKeyEnv ?? 'TYPESAFE_API_KEY'])?.trim(); if (!key) return null
+    const timeout=request.timeout_ms ?? this.#config.timeoutMs ?? 10000; const timeoutSignal=AbortSignal.timeout(timeout); const fused=signal===undefined?timeoutSignal:AbortSignal.any([signal,timeoutSignal])
+    const base=(this.#config.baseURL ?? 'https://api.typesafe.ai').replace(/\/$/,''); let response:Response
+    try { response=await (this.#config.fetch ?? fetch)(`${base}/v1/systemone`,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({state:request.state,model:request.model ?? this.#config.model ?? 'jev-latest',questions:request.questions}),signal:fused,redirect:'error'}) }
     catch(error) { if (signal?.aborted) throw new JevError('ABORTED','Jev call aborted'); if (timeoutSignal.aborted) throw new JevError('TIMEOUT','Jev call timed out'); throw new JevError('TRANSPORT','Jev transport failed') }
-    if (!response.ok) { const code=response.status===401||response.status===403?'AUTH':response.status===429?'RATE_LIMIT':response.status>=500?'SERVER':'TRANSPORT'; throw new JevError(code,'Jev request failed',response.status) }
-    let value:unknown; try { value=await response.json() } catch {
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); const code=response.status===401||response.status===403?'AUTH':response.status===429?'RATE_LIMIT':response.status>=500?'SERVER':'TRANSPORT'; throw new JevError(code,'Jev request failed',response.status) }
+    let value:unknown; try {
+      if (response.body === null) throw new Error('missing body')
+      const reader = response.body.getReader()
+      const chunks: Uint8Array[] = []
+      let bytes = 0
+      try {
+        while (true) {
+          const next = await reader.read()
+          if (next.done) break
+          bytes += next.value.byteLength
+          if (bytes > 1048576) {
+            await reader.cancel()
+            throw new Error('response too large')
+          }
+          chunks.push(next.value)
+        }
+      } finally { reader.releaseLock() }
+      value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    } catch {
       if (signal?.aborted) throw new JevError('ABORTED','Jev call aborted')
       if (timeoutSignal.aborted) throw new JevError('TIMEOUT','Jev call timed out')
       throw new JevError('MALFORMED_RESPONSE','Jev returned invalid JSON')

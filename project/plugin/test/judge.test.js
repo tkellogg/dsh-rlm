@@ -47,3 +47,27 @@ test('safeJudge does not conceal invalid caller input', async () => {
   const client=new JevClient({apiKey:''})
   await assert.rejects(client.safeJudge({state:{},questions:{}}),{code:'INVALID_REQUEST'})
 })
+
+test('standalone client does not serialize or inspect its key', async () => {
+  const {inspect}=await import('node:util')
+  const client=new JevClient({apiKey:'private-test-key'})
+  assert.doesNotMatch(JSON.stringify(client),/private-test-key/)
+  assert.doesNotMatch(inspect(client),/private-test-key/)
+})
+
+test('oversized state is rejected without a request and cancelled no-key calls abort', async () => {
+  let calls=0
+  const client=new JevClient({apiKey:'',fetch:async()=>{calls++;throw new Error()}})
+  await assert.rejects(client.judge({...request,state:'x'.repeat(262145)}),{code:'INVALID_REQUEST'})
+  const controller=new AbortController();controller.abort()
+  await assert.rejects(client.judge(request,controller.signal),{code:'ABORTED'})
+  assert.equal(calls,0)
+})
+
+test('response body is bounded and cancellation is preserved while reading', async () => {
+  const oversized=new JevClient({apiKey:'test',fetch:async()=>new Response('x'.repeat(1048577))})
+  await assert.rejects(oversized.judge(request),{code:'MALFORMED_RESPONSE'})
+  const control=new AbortController()
+  const cancelled=new JevClient({apiKey:'test',fetch:async()=>new Response(new ReadableStream({start(stream){control.abort();stream.error(new Error('aborted'))}}))})
+  await assert.rejects(cancelled.safeJudge(request,control.signal),{code:'ABORTED'})
+})
