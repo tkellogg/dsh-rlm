@@ -38,7 +38,7 @@ _MAX_CHECKPOINT_TEXT_CHARS = 512
 _MAX_PROTOCOL_TEXT_CHARS = 65_536
 _CALLBACK_CAPABILITY = "host-callback-v1"
 _CALLBACK_METHODS = frozenset(
-    ("tools.list", "tools.call", "models.complete", "mailbox.delivery")
+    ("tools.list", "tools.call", "models.complete", "mailbox.delivery", "judge.judge")
 )
 _EOF = object()
 _MAX_SAFE_INTEGER = (1 << 53) - 1

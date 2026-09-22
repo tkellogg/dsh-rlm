@@ -239,6 +239,32 @@ class Models:
         return await _invoke_host_callback(self._runtime, "models.complete", params)
 
 
+class Judge:
+    """Optional structured judge service; ``None`` means no decision available."""
+
+    def __init__(self, runtime: Runtime[Any]) -> None:
+        self._runtime = runtime
+
+    async def judge(
+        self,
+        state: Any,
+        questions: dict[str, Any],
+        *,
+        model: str | None = None,
+        timeout: int | None = None,
+        safe: bool = False,
+    ) -> Any | None:
+        if not isinstance(questions, dict) or not questions:
+            raise ValueError("questions must be a non-empty dictionary")
+        if model is not None and (not isinstance(model, str) or not model):
+            raise TypeError("model must be a non-empty string or None")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > 120_000):
+            raise TypeError("timeout must be an integer from 1 through 120000 or None")
+        return await _invoke_host_callback(self._runtime, "judge.judge", {
+            "state": state, "questions": questions, "model": model,
+            "timeout_ms": timeout, "safe": safe,
+        })
+
 class _UnavailableNamespace:
     """Explicit placeholder for bridges outside this pure-Python milestone."""
 
@@ -308,6 +334,7 @@ class Runtime(Generic[M]):
         self.host_workers = HostWorkers(self)
         self.tools = Tools(self)
         self.models = Models(self)
+        self.judge = Judge(self)
         self.processes = _UnavailableNamespace("processes")
         self.recovery = None
         self.mailboxes = Mailboxes(self, self._state.registry)

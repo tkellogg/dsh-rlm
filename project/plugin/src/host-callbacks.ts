@@ -12,6 +12,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { sanitizeAgentId, type BridgeCallbackDispatcher } from './bridge-client.js'
 import type { CallbackRequest, WorkerLeaseWire, WorkerRequest } from './protocol.js'
 import { HostWorkerAuthority, WorkerInvocationError, type WorkerLease } from './host-worker-authority.js'
+import { JevClient, type JudgeRequest } from './judge.js'
 
 const DENIED_TOOLS = new Set(['execute_python', 'subagent_fork'])
 // Cooperative pressure ceiling across both host inbox lists. The caller may
@@ -78,6 +79,7 @@ function serializeToolCall<T>(execution: HostCallbackExecution, operation: () =>
 /** Build the dispatcher used by one shared BridgePool. */
 export function createHostCallbackDispatcher(ctx: Context): BridgeCallbackDispatcher {
   let globalWorkerPermits = 0
+  const judge = new JevClient()
   const acquirePermit = (): void => { if (globalWorkerPermits >= 64) throw hostError('WORKER_GLOBAL_CAPACITY', 'Global host worker capacity reached'); globalWorkerPermits += 1 }
   const releasePermit = (): void => { globalWorkerPermits = Math.max(0, globalWorkerPermits - 1) }
   const runs = new Map<string, { authority: HostWorkerAuthority<Agent>, owner: Agent, lifetimes: Map<string, { timer: ReturnType<typeof setTimeout>, expiresAt: number }> }>()
@@ -99,6 +101,10 @@ export function createHostCallbackDispatcher(ctx: Context): BridgeCallbackDispat
         }
         if (request.method === 'mailbox.delivery') {
           return deliverMailbox(ctx, request, execution, agent, signal)
+        }
+        if (request.method === 'judge.judge') {
+          const params = request.params as unknown as JudgeRequest & { safe: boolean }
+          return params.safe ? await judge.safeJudge(params, signal) : await judge.judge(params, signal)
         }
         return await completeModel(ctx, request, agent, signal)
       })
@@ -138,7 +144,7 @@ export function createHostCallbackDispatcher(ctx: Context): BridgeCallbackDispat
         const result = await run.authority.invoke(lease, request.id, async (signal, freshEffectId, agent) => {
           effectId = freshEffectId
           if (ctx.agents.get(agent.id) !== agent) throw hostError('AGENT_DISPOSED', 'Host worker owner is no longer live')
-          return await ctx.agents.withInitiator(agent, async () => await dispatchFreshWorker(ctx, request, agent, signal, freshEffectId))
+          return await ctx.agents.withInitiator(agent, async () => await dispatchFreshWorker(ctx, request, agent, signal, freshEffectId, judge))
         }, request.timeout_ms)
         return { kind: 'worker_result', id: request.id, ok: true, effect_id: effectId, result }
       } catch (error) {
@@ -296,9 +302,13 @@ function errorParts(error: unknown): { code: string, message: string } { return 
 function simpleWorkerFailure(kind: string, id: string, error: unknown): Record<string, unknown> { return { kind, id, ok: false, error: errorParts(error) } }
 function invokeWorkerFailure(id: string, effectId: string | null, error: unknown, outcomeUnknown: boolean): Record<string, unknown> { return { kind: 'worker_result', id, ok: false, effect_id: effectId, error: { ...errorParts(error), outcome_unknown: outcomeUnknown } } }
 
-async function dispatchFreshWorker(ctx: Context, request: Extract<WorkerRequest, { kind: 'worker_invoke' }>, agent: Agent, signal: AbortSignal, effectId: string): Promise<unknown> {
+async function dispatchFreshWorker(ctx: Context, request: Extract<WorkerRequest, { kind: 'worker_invoke' }>, agent: Agent, signal: AbortSignal, effectId: string, judge: JevClient): Promise<unknown> {
   signal.throwIfAborted()
   if (request.method === 'tools.list') return ctx.tools.schemas(agent).filter(schema => !DENIED_TOOLS.has(schema.name))
+  if (request.method === 'judge.judge') {
+    const params = request.params as unknown as JudgeRequest & { safe: boolean }
+    return params.safe ? await judge.safeJudge(params, signal) : await judge.judge(params, signal)
+  }
   if (request.method === 'tools.call') {
     const toolName = request.params.name as string
     if (DENIED_TOOLS.has(toolName)) throw hostError('REENTRANT_TOOL_DENIED', `Host worker cannot call ${toolName}`)

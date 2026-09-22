@@ -74,14 +74,14 @@ interface FailureResponse {
 export type BridgeResponse = SuccessResponse | FailureResponse
 
 export interface WorkerLeaseWire { run_id: string; worker_id: string; generation: number; admission_id: string }
-export type WorkerMethod = 'tools.list' | 'tools.call' | 'models.complete'
+export type WorkerMethod = 'tools.list' | 'tools.call' | 'models.complete' | 'judge.judge'
 export interface WorkerAdmitRequest { kind: 'worker_admit'; id: string; parent_id: string; run_id: string; worker_id: string; lifetime_ms: number | null }
 export interface WorkerInvokeRequest { kind: 'worker_invoke'; id: string; lease: WorkerLeaseWire; method: WorkerMethod; params: Record<string, unknown>; timeout_ms: number }
 export interface WorkerReleaseRequest { kind: 'worker_release'; id: string; lease: WorkerLeaseWire }
 export interface WorkerCancelRequest { kind: 'worker_cancel'; id: string; lease: WorkerLeaseWire; invocation_id: string }
 export type WorkerRequest = WorkerAdmitRequest | WorkerInvokeRequest | WorkerReleaseRequest | WorkerCancelRequest
 
-export type CallbackMethod = 'tools.list' | 'tools.call' | 'models.complete' | 'mailbox.delivery'
+export type CallbackMethod = 'tools.list' | 'tools.call' | 'models.complete' | 'mailbox.delivery' | 'judge.judge'
 
 export interface CallbackRequest {
   kind: 'callback'
@@ -211,6 +211,10 @@ function validateCallbackParams(method: CallbackMethod, params: Record<string, u
     }
     return
   }
+  if (method === 'judge.judge') {
+    if (!hasExactKeys(params, ['state', 'questions', 'model', 'timeout_ms', 'safe']) || !isJsonValue(params.state) || !isRecord(params.questions) || !isJsonValue(params.questions) || (params.model !== null && typeof params.model !== 'string') || (params.timeout_ms !== null && !isDeadline(params.timeout_ms)) || typeof params.safe !== 'boolean') throw new Error('Python bridge emitted invalid judge.judge callback params')
+    return
+  }
   const allowed = ['prompt', 'system', 'provider', 'model', 'reasoning_effort', 'max_tokens']
   if (!Object.keys(params).every(key => allowed.includes(key))
     || typeof params.prompt !== 'string'
@@ -245,7 +249,7 @@ export function parseBridgeFrame(line: string): BridgeFrame {
   if (isRecord(value) && value.kind === 'worker_invoke') {
     if (!hasExactKeys(value, ['kind', 'id', 'lease', 'method', 'params', 'timeout_ms'])
       || !isWorkerId(value.id) || !isWorkerLease(value.lease)
-      || (value.method !== 'tools.list' && value.method !== 'tools.call' && value.method !== 'models.complete')
+      || (value.method !== 'tools.list' && value.method !== 'tools.call' && value.method !== 'models.complete' && value.method !== 'judge.judge')
       || !isRecord(value.params) || !isDeadline(value.timeout_ms)) throw new Error('Python bridge emitted an invalid worker invocation')
     validateCallbackParams(value.method, value.params)
     return { kind: 'worker_invoke', id: value.id, lease: value.lease, method: value.method, params: value.params, timeout_ms: value.timeout_ms }
@@ -262,7 +266,7 @@ export function parseBridgeFrame(line: string): BridgeFrame {
     if (!hasExactKeys(value, ['kind', 'id', 'parent_id', 'method', 'params'])
       || !isBoundedCallbackId(value.id) || !isBoundedCallbackId(value.parent_id)
       || (value.method !== 'tools.list' && value.method !== 'tools.call'
-        && value.method !== 'models.complete' && value.method !== 'mailbox.delivery')
+        && value.method !== 'models.complete' && value.method !== 'mailbox.delivery' && value.method !== 'judge.judge')
       || !isRecord(value.params)) {
       throw new Error('Python bridge emitted an invalid callback envelope')
     }

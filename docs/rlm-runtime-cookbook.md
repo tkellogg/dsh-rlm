@@ -197,3 +197,11 @@ for outcome in runtime.host_workers.inspect_outcomes():
 Outcome inspection is bounded, process-live diagnostic state, not a durable inbox or proof of exactly-once effects. Cancellation or transport loss after dispatch can leave an uncertain outcome; do not automatically retry. Retirement can invalidate all handles for that bridge generation and may terminate the entire bridge to fail closed. A generation accepts at most 4,096 worker request IDs; reaching the cap requires a fresh bridge generation and does not replay work.
 
 Local `Runtime.send`/mailboxes are distinct from the guarded DSH orchestration tool named `send_message`, invoked as `await runtime.tools.call("send_message", {...})`. An admitted background worker may call that tool if current policy permits, but it addresses a DSH subagent through the harness—not a local mailbox—and does not create pubsub, durable inboxes, automatic parent wakeups, or DSH-subagent semantics.
+
+## Optional Jev judge
+
+Jev is a structured judge, not a streaming text model. Use `await runtime.judge.judge(state, questions, safe=True)` from an active RLM cell or admitted program agent. Questions are keyed Choice, Score, or Noul objects.
+
+The host reads `TYPESAFE_API_KEY`; credentials never enter Python. Without a key the result is `None` and no request occurs. Configured failures raise unless `safe=True`, which converts operational failures to `None`. `None` means **no decision**, never rejection or false. State is explicit JSON; the runtime never exports its trajectory automatically.
+
+Jev is advisory only: never use it to grant permission, determine whether an effect occurred, suppress mandatory notices, or authorize retries. Defaults are `https://api.typesafe.ai/v1/systemone` and `jev-latest`.

@@ -27,6 +27,28 @@ async def send_as(runtime, body, **kwargs):
         return await runtime.send(body, **kwargs)
 
 
+
+@pytest.mark.asyncio
+async def test_runtime_judge_uses_optional_host_service_and_preserves_none():
+    rt = Runtime(rlm=True)
+    calls = []
+    async def callback(parent, method, params):
+        calls.append((parent, method, params))
+        return None
+    async with rt.bind():
+        async with rt._bind_host_callbacks("cell", callback):
+            result = await rt.judge.judge(
+                {"candidate": "a"},
+                {"pick": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
+                safe=True,
+            )
+    assert result is None
+    assert calls[0][1] == "judge.judge"
+    assert calls[0][2]["model"] is None
+    assert calls[0][2]["safe"] is True
+    await rt.close()
+
+
 def test_agent_handle_compatibility_alias_is_program_agent_handle():
     assert AgentHandle is ProgramAgentHandle
 

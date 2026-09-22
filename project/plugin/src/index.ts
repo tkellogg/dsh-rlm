@@ -7,6 +7,8 @@ import { BridgePool, type BridgePoolOptions } from './bridge-client.js'
 import { createHostCallbackDispatcher, createHostCallbackExecution } from './host-callbacks.js'
 import { isRlmAgent } from './policy.js'
 import type { ExecuteResult } from './protocol.js'
+export { JevClient, JevError } from './judge.js'
+export type { JudgeRequest, JudgeResult, JudgeQuestion, ChoiceQuestion, ScoreQuestion, NoulQuestion, JevClientConfig } from './judge.js'
 import { renderResult } from './render-result.js'
 
 export const name = 'dsh-rlm'
