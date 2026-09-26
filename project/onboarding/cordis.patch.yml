@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-rlm-onboarding
+      name: "@dsh-rlm/onboarding"

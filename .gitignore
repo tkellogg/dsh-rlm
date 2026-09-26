@@ -10,3 +10,10 @@ dist/
 
 # Local runtime state
 .dsh-rlm/
+
+# Packaging caches and private installation tests
+.cache/
+.npm-cache/
+.uv-cache/
+.release-test/
+*.tgz

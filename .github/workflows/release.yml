@@ -1,0 +1,151 @@
+name: Release app archives and Python distributions
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing stable source tag version without v (e.g. 0.1.0)'
+        required: true
+        type: string
+      publish:
+        description: 'Create a draft GitHub release (release environment approval required)'
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - name: Require source and tag version agreement
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, tomllib
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+              raise SystemExit('Expected a stable source tag vX.Y.Z')
+          version = tomllib.loads(pathlib.Path('project/python/pyproject.toml').read_text())['project']['version']
+          if tag != f'v{version}':
+              raise SystemExit(f'Source version {version} does not match {tag}')
+          PY
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
+      - name: Build universal wheel and sdist separately from native app
+        run: uv build project/python --out-dir dist/python
+      - name: Verify wheel metadata and real console entry point
+        run: |
+          python - <<'PY'
+          import email, pathlib, tomllib, zipfile
+          version = tomllib.loads(pathlib.Path('project/python/pyproject.toml').read_text())['project']['version']
+          wheels = list(pathlib.Path('dist/python').glob('*.whl'))
+          assert len(wheels) == 1 and wheels[0].name == f'dsh_rlm-{version}-py3-none-any.whl', wheels
+          assert pathlib.Path(f'dist/python/dsh_rlm-{version}.tar.gz').is_file()
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              metadata = email.message_from_bytes(wheel.read(f'dsh_rlm-{version}.dist-info/METADATA'))
+              assert metadata['Name'] == 'dsh-rlm' and metadata['Version'] == version
+              entries = wheel.read(f'dsh_rlm-{version}.dist-info/entry_points.txt').decode()
+              assert 'dsh-rlm = dsh_rlm.cli:main' in entries
+          PY
+          wheel=$(echo "$PWD"/dist/python/*.whl)
+          uv tool run --from "$wheel" dsh-rlm --help
+          uv tool run --from "$wheel" dsh-rlm --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/python/*
+          if-no-files-found: error
+  build:
+    needs: python
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-14
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            platform: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/python
+      - name: Build Node and prebuilt app archive (no Python runtime)
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: bash scripts/release-build.sh
+      - name: Smoke real Python console with relocated native app (no live GUI)
+        run: bash scripts/release-smoke.sh dist/release/*.tar.gz dist/python/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+            dist/release/VERSION
+          if-no-files-found: error
+  assemble:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Assemble verified app checksums
+        run: |
+          cd dist/release
+          sha256sum --check *.sha256
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+            dist/release/SHA256SUMS
+            dist/release/VERSION
+          if-no-files-found: error
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: assemble
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: dist/release
+      - name: Create draft release only; PyPI is a separate manual workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "v$VERSION" dist/release/* --draft --verify-tag --title "dsh-rlm v$VERSION" --generate-notes

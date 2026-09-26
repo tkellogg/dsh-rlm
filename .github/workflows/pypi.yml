@@ -1,0 +1,179 @@
+name: Publish Python distribution to PyPI
+# Configure PyPI Trusted Publisher for this repository, pypi.yml, environment pypi.
+# Configure the pypi GitHub environment with required reviewers before enabling it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing public GitHub release tag (stable vX.Y.Z)'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: pypi-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - name: Require source and tag version agreement
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, tomllib
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+              raise SystemExit('Expected a stable source tag vX.Y.Z')
+          version = tomllib.loads(pathlib.Path('project/python/pyproject.toml').read_text())['project']['version']
+          if tag != f'v{version}':
+              raise SystemExit(f'Source version {version} does not match {tag}')
+          PY
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
+      - name: Verify public matching GitHub app assets before building
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, urllib.request
+          tag = os.environ['RELEASE_TAG']
+          repo = os.environ['GITHUB_REPOSITORY']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+              raise SystemExit('Invalid release tag')
+          # Deliberately unauthenticated: uvx users must be able to download these assets.
+          api = f'https://api.github.com/repos/{repo}/releases/tags/{tag}'
+          with urllib.request.urlopen(api, timeout=60) as response:
+              release = json.load(response)
+          if release['draft'] or release['tag_name'] != tag:
+              raise SystemExit('Matching public GitHub release is required')
+          assets = {asset['name']: asset['browser_download_url'] for asset in release['assets']}
+          names = [f'dsh-rlm-{tag}-{platform}.tar.gz' for platform in
+                   ('linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64')]
+          for name in [*names, 'SHA256SUMS', 'VERSION']:
+              if name not in assets:
+                  raise SystemExit(f'Missing release asset: {name}')
+          def text(name):
+              with urllib.request.urlopen(assets[name], timeout=60) as response:
+                  return response.read(1024 * 1024).decode('utf-8')
+          if text('VERSION').strip() != tag[1:]:
+              raise SystemExit('GitHub VERSION does not match source tag')
+          sums = {}
+          for line in text('SHA256SUMS').splitlines():
+              parts = line.split()
+              if len(parts) != 2 or not re.fullmatch(r'[a-fA-F0-9]{64}', parts[0]):
+                  raise SystemExit('Malformed SHA256SUMS')
+              name = parts[1].removeprefix('*')
+              if name in sums:
+                  raise SystemExit(f'Duplicate checksum: {name}')
+              sums[name] = parts[0].lower()
+          for name in names:
+              if name not in sums:
+                  raise SystemExit(f'Missing checksum: {name}')
+              digest = hashlib.sha256()
+              with urllib.request.urlopen(assets[name], timeout=120) as response:
+                  while chunk := response.read(1024 * 1024):
+                      digest.update(chunk)
+              if digest.hexdigest() != sums[name]:
+                  raise SystemExit(f'Checksum mismatch: {name}')
+              print(f'Public matching app archive verified: {name}')
+          PY
+      - name: Build universal wheel and sdist
+        run: uv build project/python --out-dir dist/python
+      - name: Verify wheel metadata and real console entry point
+        run: |
+          python - <<'PY'
+          import email, pathlib, tomllib, zipfile
+          version = tomllib.loads(pathlib.Path('project/python/pyproject.toml').read_text())['project']['version']
+          wheels = list(pathlib.Path('dist/python').glob('*.whl'))
+          assert len(wheels) == 1 and wheels[0].name == f'dsh_rlm-{version}-py3-none-any.whl', wheels
+          assert pathlib.Path(f'dist/python/dsh_rlm-{version}.tar.gz').is_file()
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              metadata = email.message_from_bytes(wheel.read(f'dsh_rlm-{version}.dist-info/METADATA'))
+              assert metadata['Name'] == 'dsh-rlm' and metadata['Version'] == version
+              entries = wheel.read(f'dsh_rlm-{version}.dist-info/entry_points.txt').decode()
+              assert 'dsh-rlm = dsh_rlm.cli:main' in entries
+          PY
+          wheel=$(echo "$PWD"/dist/python/*.whl)
+          uv tool run --from "$wheel" dsh-rlm --help
+          uv tool run --from "$wheel" dsh-rlm --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypi-distributions
+          path: dist/python/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dsh-rlm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-distributions
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Reverify public app archives after environment approval, before publication
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, urllib.request
+          tag = os.environ['RELEASE_TAG']
+          repo = os.environ['GITHUB_REPOSITORY']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+              raise SystemExit('Invalid release tag')
+          # Deliberately unauthenticated: uvx users must be able to download these assets.
+          api = f'https://api.github.com/repos/{repo}/releases/tags/{tag}'
+          with urllib.request.urlopen(api, timeout=60) as response:
+              release = json.load(response)
+          if release['draft'] or release['tag_name'] != tag:
+              raise SystemExit('Matching public GitHub release is required')
+          assets = {asset['name']: asset['browser_download_url'] for asset in release['assets']}
+          names = [f'dsh-rlm-{tag}-{platform}.tar.gz' for platform in
+                   ('linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64')]
+          for name in [*names, 'SHA256SUMS', 'VERSION']:
+              if name not in assets:
+                  raise SystemExit(f'Missing release asset: {name}')
+          def text(name):
+              with urllib.request.urlopen(assets[name], timeout=60) as response:
+                  return response.read(1024 * 1024).decode('utf-8')
+          if text('VERSION').strip() != tag[1:]:
+              raise SystemExit('GitHub VERSION does not match source tag')
+          sums = {}
+          for line in text('SHA256SUMS').splitlines():
+              parts = line.split()
+              if len(parts) != 2 or not re.fullmatch(r'[a-fA-F0-9]{64}', parts[0]):
+                  raise SystemExit('Malformed SHA256SUMS')
+              name = parts[1].removeprefix('*')
+              if name in sums:
+                  raise SystemExit(f'Duplicate checksum: {name}')
+              sums[name] = parts[0].lower()
+          for name in names:
+              if name not in sums:
+                  raise SystemExit(f'Missing checksum: {name}')
+              digest = hashlib.sha256()
+              with urllib.request.urlopen(assets[name], timeout=120) as response:
+                  while chunk := response.read(1024 * 1024):
+                      digest.update(chunk)
+              if digest.hexdigest() != sums[name]:
+                  raise SystemExit(f'Checksum mismatch: {name}')
+              print(f'Public matching app archive verified: {name}')
+          PY
+      - name: Publish wheel and sdist using PyPI Trusted Publishing (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

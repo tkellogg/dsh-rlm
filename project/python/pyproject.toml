@@ -1,7 +1,7 @@
 [project]
 name = "dsh-rlm"
 version = "0.1.0"
-description = "Pure Python runtime primitives for DSH RLM agents"
+description = "Python-native agents on DeepSeek Harness, launched with uvx"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,9 +9,19 @@ dependencies = [
     "pydantic>=2.11",
 ]
 
+[project.scripts]
+dsh-rlm = "dsh_rlm.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/tkellogg/dsh-rlm"
+Repository = "https://github.com/tkellogg/dsh-rlm"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/dsh_rlm", "tests", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dsh_rlm"]

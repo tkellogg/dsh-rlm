@@ -1,4 +1,34 @@
-# dsh-rlm Python core
+# DSH RLM
+
+A Python-native agent environment built on DeepSeek Harness.
+
+## Launch
+
+After the package and matching native assets are released:
+
+```sh
+uvx dsh-rlm
+uvx dsh-rlm setup
+uvx dsh-rlm doctor
+```
+
+Or install a persistent command:
+
+```sh
+uv tool install dsh-rlm
+dsh-rlm
+```
+
+Upgrade with `uvx --upgrade dsh-rlm` or `uv tool upgrade dsh-rlm`.
+The first launch downloads a version-matched prebuilt Node/DSH application with
+checksum verification. Python comes from uv's tool environment. No npm account,
+Git clone, or existing DSH installation is needed. Credentials, sessions, and
+checkpoints remain outside uv's cache. macOS and glibc Linux are the first targets.
+
+Publication and full native-app acceptance are still pending. See
+[the project](https://github.com/tkellogg/dsh-rlm) for release status.
+
+## Python runtime
 
 The Python half of the DSH RLM mode provides:
 
