@@ -9,13 +9,20 @@ window.__ModuleLoader__.load({
     const at = (value, path) => path.reduce((v, key) => v?.[key], value);
     async function loadFacts(ctx) {
       const describe = ctx.settingsScope.describe();
+      const warnings = [];
+      // Independent capabilities: a catalog/auth failure must not erase the directory.
+      const attempt = async (label, fn, fallback) => {
+        try { return await fn(); }
+        catch { warnings.push(`${label} unavailable. Refresh or open its settings below.`); return fallback; }
+      };
       const [live, declared, catalog] = await Promise.all([
-        ctx.remote.llm.listProviders().then(unwrap),
-        ctx.remote.llm.listConfigurableProviders().then(unwrap),
-        ctx.remote.session.modelCatalog().then(unwrap), describe.ensure()
+        attempt("Active providers", () => ctx.remote.llm.listProviders().then(unwrap), []),
+        attempt("Provider directory", () => ctx.remote.llm.listConfigurableProviders().then(unwrap), []),
+        attempt("Model catalog", () => ctx.remote.session.modelCatalog().then(unwrap), {groups:[],failures:[]}),
+        attempt("Settings", () => describe.ensure(), undefined)
       ]);
       const view = describe.getSnapshot().view;
-      if (!view) throw new Error("Settings unavailable");
+      if (!view) warnings.push("Settings unavailable. Open this app through its authenticated localhost URL to configure providers.");
       const rows = declared.map(d => ({ ...d, active: live.some(p => p.id === d.provider) }));
       for (const p of live) if (!rows.some(r => r.provider === p.id)) rows.push({provider:p.id, displayName:p.name, active:true, settingsPath:[]});
       let auth = null;
@@ -23,18 +30,18 @@ window.__ModuleLoader__.load({
         try { auth = unwrap(await ctx.connection.rpc.call("/api", "subscriptions-auth.status", {})).providers; } catch { /* absent adapter or status unavailable is not authenticated */ }
       }
       for (const row of rows) {
-        const ns = view.namespaces.find(n => n.ns === row.settingsNs);
+        const ns = view?.namespaces.find(n => n.ns === row.settingsNs);
         const profile = at(ns?.value, row.settingsPath || []);
         row.ref = profile?.apiKeyEnv;
         row.authSection = subscriptions.has(row.provider) ? "subscriptions" : "models";
         row.auth = subscriptions.has(row.provider)
           ? (auth?.[row.provider]?.accounts?.length > 0 ? "stored" : "missing")
-          : row.ref ? "missing" : "external";
+          : !view ? "unknown" : row.ref ? "missing" : "external";
       }
       const refs = [...new Set(rows.map(r => r.ref).filter(Boolean))];
-      const credentials = refs.length ? unwrap(await ctx.remote.credentials.describe(refs)) : {};
+      const credentials = refs.length ? await attempt("Credential status", async () => unwrap(await ctx.remote.credentials.describe(refs)), {}) : {};
       for (const row of rows) if (row.ref && !subscriptions.has(row.provider)) row.auth = credentials[row.ref]?.configured === true ? "stored" : "missing";
-      return { rows, catalog };
+      return { rows, catalog, warnings };
     }
     function selectable(facts, provider, model, externalConfirmed) {
       const row = facts?.rows.find(r => r.provider === provider);
@@ -78,7 +85,7 @@ window.__ModuleLoader__.load({
             if (complete && savedDefault?.provider && savedDefault?.model && selectable(next, savedDefault.provider, savedDefault.model, false)) complete();
           }
         }
-        catch { if (alive.current && g === generation.current) { setFacts(null); setMessage("Could not read provider/authentication state. Retry; setup is not complete."); } }
+        catch { if (alive.current && g === generation.current) { setMessage("Setup could not refresh. Open Models or Subscriptions below to connect your provider, then return and retry."); } }
         finally { if (alive.current && g === generation.current) setBusy(false); }
       };
       React.useEffect(() => { alive.current = true; refresh(); return () => { alive.current = false; ++generation.current; }; }, [ctx]);
@@ -94,15 +101,19 @@ window.__ModuleLoader__.load({
       const button = (label, onClick, disabled=false) => h("button", {type:"button", onClick, disabled, style:{padding:"8px 12px", marginRight:8}}, label);
       return h("section", {style:{padding:24, maxWidth:660, display:"grid", gap:16}},
         h("h2", null, "Set up dsh-rlm"),
-        h("p", null, "Choose an installed provider, authenticate with its supported adapter, then save your default model. Models settings remain available for advanced configuration."),
+        h("p", null, "Connect your preferred provider, then choose a default model. You can use an API key or a supported subscription account."),
+        openSection && h("div", null,
+          button("Connect a subscription", () => { complete?.(); openSection("subscriptions"); }),
+          button("Set up an API provider", () => { complete?.(); openSection("models"); })),
+        (facts?.warnings || []).map(w => h("p", {key:w,role:"status"}, w)),
         h("label", null, "1. Provider", h("select", {value:provider, onChange:changeProvider, disabled:busy, style:{display:"block",width:"100%",padding:8}},
           h("option", {value:""}, "Choose a provider"), ...(facts?.rows || []).map(r => h("option", {key:r.provider,value:r.provider}, `${r.displayName} (${r.provider})${r.active ? "" : " — adapter inactive"}`)))),
-        facts && !facts.rows.length && h("p", {role:"alert"}, "No adapters are installed. Install a supported LLM adapter before continuing."),
+        facts && !facts.rows.length && h("p", {role:"alert"}, "No providers could be listed yet. Open Subscriptions or Models above to configure a provider, then return to Setup and refresh."),
         row && h("div", null,
           h("h3", null, "2. Authentication"),
-          h("p", null, row.auth === "stored" ? "Host reports stored credentials/account. This does not prove current authorization or quota." : row.auth === "missing" ? "Authentication is missing or unavailable. Configure it using the adapter-owned settings." : "This adapter uses its own authentication (for example ADC, environment, or a local endpoint). Setup cannot verify it."),
+          h("p", null, row.auth === "stored" ? "Host reports stored credentials/account. This does not prove current authorization or quota." : ["missing","unknown"].includes(row.auth) ? "Authentication is missing or unavailable. Configure it using the adapter-owned settings." : "This adapter uses its own authentication (for example ADC, environment, or a local endpoint). Setup cannot verify it."),
           h("p", null, `Use Settings → ${row.authSection === "subscriptions" ? "Subscriptions" : "Models"}, configure ${row.displayName}, then return to Settings → Setup and refresh. Only the adapter's own supported authentication methods are offered there.`),
-          openSection && button("Open authentication settings", () => { complete(); openSection(row.authSection); }, busy),
+          openSection && button("Open authentication settings", () => { complete?.(); openSection(row.authSection); }, busy),
           row.auth === "external" && h("label", null, h("input", {type:"checkbox",checked:external,disabled:busy,onChange:e=>{setExternal(e.target.checked);setSaved(false);}}), " I configured this adapter's external authentication (not verified).")),
         h("label", null, "3. Default model", h("select", {value:model, disabled:busy || !row?.active, onChange:e=>{setModel(e.target.value);setSaved(false);}, style:{display:"block",width:"100%",padding:8}},
           h("option", {value:""}, "Choose an advertised model"), ...models.map(m=>h("option",{key:m.id,value:m.id},m.name || m.id)))),
@@ -126,6 +137,6 @@ window.__ModuleLoader__.load({
       ctx.slots.inject("settings.onboarding", () => ctx.slots.register({name:"settings.onboarding", id:"deepseek-official", priority:-100, order:0, inject}, Onboarding));
       ctx.slots.inject("settings.section", () => ctx.slots.register({name:"settings.section", id:"dsh-rlm-setup", order:5, label:()=>"Setup", inject}, Setup));
     }
-    return { apply, inject:["slots","remote.llm","remote.session","remote.credentials","settingsScope","connection"], loadFacts, selectable, saveDefault };
+    return { apply, inject:["slots","remote","remote.llm","remote.session","remote.credentials","settingsScope","connection"], loadFacts, selectable, saveDefault };
   }
 });

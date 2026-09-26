@@ -6,13 +6,7 @@ with your choice of inference provider.
 
 ## Run with uv
 
-**Experimental release:** [v0.1.0](https://github.com/tkellogg/dsh-rlm/releases/tag/v0.1.0) is available for **macOS Apple Silicon only**. PyPI upload is pending credentials. Until then, run the published wheel directly:
-
-```sh
-uvx --from https://github.com/tkellogg/dsh-rlm/releases/download/v0.1.0/dsh_rlm-0.1.0-py3-none-any.whl dsh-rlm
-```
-
-After PyPI publication, the short command will be:
+**Experimental release:** available on [PyPI](https://pypi.org/project/dsh-rlm/) for **macOS Apple Silicon only**. Native bundles are hosted on [GitHub Releases](https://github.com/tkellogg/dsh-rlm/releases).
 
 ```sh
 uvx dsh-rlm
@@ -44,7 +38,7 @@ setup offers installed provider adapters rather than requiring a DeepSeek key;
 authentication methods depend on the chosen adapter and account. RLM Mode is the
 default for new sessions.
 
-Initial application targets: macOS and glibc Linux, arm64 and x86-64.
+Currently published native platform: macOS arm64. Planned additional targets: macOS x86-64 and glibc Linux arm64/x86-64.
 See the [distribution guide](docs/distribution.md) for build, storage, and release details.
 
 ## Runtime capabilities

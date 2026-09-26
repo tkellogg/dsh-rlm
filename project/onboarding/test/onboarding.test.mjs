@@ -67,7 +67,12 @@ test('read-only default and revoked auth prevent write',async()=>{
     const {ctx,writes}=fixture(options);await assert.rejects(plugin.saveDefault(ctx,null,'codex','model-1',false));assert.equal(writes.length,0);
   }
 });
+
 test('business transport errors do not become successful facts',async()=>{
   const {ctx}=fixture();ctx.remote.llm.listProviders=async()=>({ok:false,error:{message:'private'}});
-  await assert.rejects(plugin.loadFacts(ctx),/Host request failed/);
+  const facts=await plugin.loadFacts(ctx);
+  assert.equal(facts.rows.length,1);
+  assert.equal(plugin.selectable(facts,'codex','model-1',true),false);
+  assert.match(facts.warnings.join(' '),/Active providers/);
+  assert.ok(!JSON.stringify(facts).includes('private'));
 });

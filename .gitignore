@@ -16,4 +16,5 @@ dist/
 .npm-cache/
 .uv-cache/
 .release-test/
+.browser-test/
 *.tgz

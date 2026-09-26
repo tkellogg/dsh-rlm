@@ -1,6 +1,30 @@
 # Installation verification report
 
-Local macOS arm64 testing; no publication, real provider login, or replacement server.
+## Current browser verification (0.1.1 preparation)
+
+Published 0.1.0 exists on PyPI and GitHub for macOS arm64. A fresh published-wheel
+install downloaded/checksummed/extracted its native payload and passed doctor/config
+compilation. Real Chrome subsequently reproduced its empty onboarding directory.
+
+The exact browser exception was `cannot get property "remote" without inject`:
+our client declared remote namespaces but omitted the parent `remote` service.
+Adding that declaration fixes the scoped Cordis context. Chrome on an isolated
+patched native instance lists 45 providers and successfully opens Models and
+Subscriptions (five subscription provider rows). Provider-directory, model-catalog,
+and subscription-status requests returned HTTP 200. No provider login or paid
+inference was performed. Existing servers on ports 3080 and 3081 were untouched.
+
+The revised UI also preserves provider discovery when settings/catalog/credential
+reads fail and offers authentication settings without requiring provider selection.
+18 onboarding tests against installed host dependencies pass; all 244 Python tests
+pass for the prepared 0.1.1 wheel. The exact newly extracted 0.1.1 archive launched
+through its real wheel also passed Chrome assertions in two fresh homes: 45
+providers, API settings navigation, and subscription settings/login actions.
+The installed 0.1.0 UI does not change until the process is upgraded and restarted.
+
+## Earlier installer verification history
+
+The following records describe earlier checkpoints, not current release blockers.
 
 ## Passed
 
@@ -42,19 +66,11 @@ status and failed default-setting writes cannot become successful setup.
 SIGKILL leaves an orphan private staging directory; recovery safely ignores it.
 Automatic orphan reclamation is not implemented.
 
-The earlier cache restriction is resolved. `uv build` now builds a real wheel and
-sdist; `uv tool run --from <wheel>` help/version and an isolated persistent
-`uv tool install <wheel>` succeeded. The sdist was found to include a local uv
-cache; an explicit source allowlist fixes it, and the rebuilt archive has 33
-entries with no cache/venv paths. Full app verification still needs native assets.
+Real wheel/sdist builds and uv installations now pass. Native dependency composition
+is resolved without force/legacy-peer flags using a uniform tested host version.
+0.1.1 native build, production archive checksum/extraction, and 23 relocated
+launcher/onboarding checks passed, plus doctor and DSH configuration compilation.
 
-Fresh native npm resolution exposed two dependency problems: newer Cordis components
-conflict with pinned 4.0.2, and subscriptions 0.9.2 selects older DSH 0.1.2 peers beside
-0.1.6. Vendor pins address the first; coordinated overrides/explicit root deps still
-fail npm ERESOLVE for dsh-brand/dsh-user-approval. No --force or --legacy-peer-deps was
-used to hide this. The dependency graph remains a release blocker. An obsolete build
-with mixed host versions was cancelled, and its partial archive removed.
-
-Release gates still open: clean dependency composition and lockfile, real wheel/native
-archive smoke tests, browser login and RLM turn, and Linux/x64/macOS matrix acceptance.
-No GitHub or PyPI assets were published. No uv publish credentials were needed yet.
+Still unverified: real provider login and RLM inference, upgrade behavior with
+real authenticated user state, and additional platform builds. Browser navigation
+alone is not proof of provider authentication or model access.

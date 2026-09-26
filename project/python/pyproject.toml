@@ -1,6 +1,6 @@
 [project]
 name = "dsh-rlm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python-native agents on DeepSeek Harness, launched with uvx"
 readme = "README.md"
 requires-python = ">=3.11"

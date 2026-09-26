@@ -4,6 +4,8 @@ import test from 'node:test';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createRequire} from 'node:module';
 import {join} from 'node:path';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
 const modules=process.env.DSH_NODE_MODULES;
 test('installed Loader discovers onboarding client metadata and browser artifact', {skip:!modules}, async () => {
   const require=createRequire(pathToFileURL(join(modules,'../package.json')));
@@ -22,4 +24,12 @@ test('installed Loader discovers onboarding client metadata and browser artifact
     assert.equal(ctx.clientModules.clientPath('@dsh-rlm/onboarding'),fileURLToPath(new URL('../lib/client.js',import.meta.url)));
     assert.match(JSON.stringify(ctx.clientModules.graph()),/@dsh-rlm\/onboarding/);
   } finally {await registry?.dispose();await loader.dispose();}
+});
+
+test('onboarding declares parent remote required by Cordis scoped slot contexts', {skip:!modules}, async () => {
+  let loaded;
+  vm.runInNewContext(await readFile(new URL('../lib/client.js',import.meta.url),'utf8'),{
+    window:{__ModuleLoader__:{load(entry){loaded=entry.factory(name=>name==='react'?{createElement(){}}:{Modal(){}});}}}
+  });
+  assert.ok(loaded.inject.includes('remote'));
 });

@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path, PurePosixPath
 
-SOURCE_VERSION = "0.1.0"
+SOURCE_VERSION = "0.1.1"
 RELEASE_URL = "https://github.com/tkellogg/dsh-rlm/releases/download"
 DOWNLOAD_TIMEOUT = 30
 DOWNLOAD_DEADLINE = 600

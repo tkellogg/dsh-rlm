@@ -73,7 +73,7 @@ application lockfile and upstream runtime digest manifest.
 
 ## Published experimental release
 
-GitHub v0.1.0 is published for macOS arm64 only. A fresh public-wheel install downloaded the native archive, verified SHA256, extracted it with the production installer, and compiled DSH configuration successfully. Local wheel and sdist installations through uv both passed. PyPI upload was attempted but failed with missing credentials; no PyPI publication is claimed. Native DSH resolves latest to 0.1.5-rc.3 and subscriptions to 0.9.4; latest and development-host plugin tests both pass. Browser login/inference and other platforms remain unverified.
+GitHub v0.1.0 is published for macOS arm64 only. A fresh public-wheel install downloaded the native archive, verified SHA256, extracted it with the production installer, and compiled DSH configuration successfully. Local wheel and sdist installations through uv both passed. PyPI 0.1.0 was subsequently published and its wheel/sdist availability verified. Native DSH resolves latest to 0.1.5-rc.3 and subscriptions to 0.9.4; latest and development-host plugin tests both pass. Browser login/inference and other platforms remain unverified.
 
 ## Earlier validation history (superseded by the published test above)
 

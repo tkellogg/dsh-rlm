@@ -211,7 +211,9 @@ def test_metadata_version_and_source_fallback(monkeypatch):
         raise cli.importlib.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(cli.importlib.metadata, "version", missing)
-    assert cli.package_version() == "0.1.0"
+    import tomllib
+    project = Path(__file__).parents[1] / "pyproject.toml"
+    assert cli.package_version() == tomllib.loads(project.read_text())["project"]["version"]
 
 
 def test_mismatched_override_fails_without_network(tmp_path, monkeypatch, capsys):
