@@ -60,6 +60,10 @@ flowchart TD
       code
     end
 
+    code --> s1[Subagent]
+    code --> s2[Subagent]
+    code --> s3[Subagent]
+    code --> s4[Subagent]
 ```
 
 A program agent runs an async Python function with access to the runtime APIs permitted by its authority. It has **no autonomous LLM loop**: it can run deterministic code continuously and message its parent RLM when it needs help. It can also explicitly call a model when the program asks for one.
