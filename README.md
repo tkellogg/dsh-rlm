@@ -4,7 +4,7 @@ A set of plugins for DeepSeek Harness (DSH) that enables RLMs by default, as wel
 
 ## What are RLMs & Program Agents
 
-The normal DSH as well as Claude Code & Codex are all ReACT-style agents:
+Standard DSH, Claude Code, and Codex broadly follow a model → tool → result loop (shown here as a simplified ReAct-style diagram):
 
 ```mermaid
 flowchart TD
@@ -15,14 +15,16 @@ flowchart TD
     end
 ```
 
-RLMs have the LLM work like a data scientist. It operates a "Jupyter Notebook", and so the agent now has state outside the LLM context, in variables.
+In DSH RLM, the LLM works like a data scientist: it operates a persistent Python REPL, similar to a Jupyter notebook. Variables hold state outside the model’s conversation context; no Jupyter installation is required.
 
 ```mermaid
 flowchart TD
     subgraph RLM
-        ctx[(Context)] --> LLM -->|write code, hit Enter| repl[(Python REPL)]
+        ctx[(Context)] --> LLM -->|write code| block[Code Block] -->|hit Enter| repl[(Python REPL)]
+        block -->|append code| ctx
         repl -->|append stdout| ctx
     end
+
 ```
 
 So RLMs can operate over very large context using Python code. Code is reusable between REPL cells (e.g. create reusable functions).
@@ -60,7 +62,9 @@ flowchart TD
 
 ```
 
-A program agent is a Python program with access to the same internal Python APIs as the RLM agent. So, when something goes wrong, the program agent can send a message back to it's parent RLM agent. Intelligent error handling! But by default, the LLM isn't ever used.
+A program agent runs an async Python function with access to the runtime APIs permitted by its authority. It has **no autonomous LLM loop**: it can run deterministic code continuously and message its parent RLM when it needs help. It can also explicitly call a model when the program asks for one.
+
+Program agents are cooperative tasks in the live Python process, not independent durable services. They can outlive the REPL cell that starts them, but live tasks and handles do not survive interpreter recovery; the parent must recreate them.
 
 ## Run with uv
 
@@ -81,10 +85,10 @@ Need uv first? Follow [uv installation](https://docs.astral.sh/uv/getting-starte
 uv manages the Python environment. On first launch, dsh-rlm downloads a checksummed,
 version-matched prebuilt Node + DSH application from GitHub Releases. No existing
 DSH, global Node, npm login, Git clone, or source build is required. Subsequent
-launches reuse that application; ordinary startup never upgrades it.
+launches reuse that version’s application bundle. A newer Python package selects a new, matching bundle; the bundled DSH version does not independently update on startup.
 
 ```sh
-uvx dsh-rlm setup                 # Revisit Settings → Setup
+uvx dsh-rlm setup                 # Launch setup; use Settings → Setup to revisit
 uvx dsh-rlm doctor                # Diagnose without downloading the application
 uvx --upgrade dsh-rlm             # Upgrade uvx's package and launch
 uv tool upgrade dsh-rlm           # Upgrade a persistent tool installation
@@ -98,6 +102,10 @@ default for new sessions.
 
 Published platforms: macOS arm64/x86-64 and glibc Linux arm64/x86-64. The same Python package and command automatically select the matching runtime bundle. Windows and Alpine/musl are not currently supported.
 See the [distribution guide](docs/distribution.md) for build, storage, and release details.
+
+All four platform bundles passed CI build and relocated-install smoke tests.
+Browser onboarding has additionally been tested in Chrome on macOS Apple Silicon;
+real provider login and inference are not covered by those smoke tests.
 
 ## Runtime capabilities
 
@@ -123,8 +131,10 @@ through those host services.
 - `project/plugin/` — Cordis bundle, RLM preset, native tool, and host callback dispatcher.
 - `research/` — design decisions and pinned DSH integration findings.
 
-The integration target is DeepSeek Harness `0.1.6-alpha.2` at commit
-`ddefc45fbc7f8e46dd73185e68295696d1297887`.
+Release builds resolve DSH’s npm `latest` by default, with a build-time
+`DSH_VERSION` override. Release **0.1.2** bundles DSH **0.1.5-rc.3** and
+subscriptions **0.9.4**. The RLM host plugin has also been tested against the
+development host **0.1.6-alpha.2**; that is not the host shipped in 0.1.2.
 See [project/plugin/README.md](project/plugin/README.md) for build, install, and
 startup instructions. For bounded inspection, task visibility, and active-cell delivery
 recipes, see the [RLM runtime cookbook](docs/rlm-runtime-cookbook.md).
