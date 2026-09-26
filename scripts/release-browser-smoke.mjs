@@ -165,23 +165,24 @@ const requiredOnboardingEndpoints = [
 
 async function verifyCase(browser, { label, port, destination }) {
   const server = await startServer(label, port);
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  const requests = [];
-  const failures = [];
-  const badResponses = [];
-  page.on('request', request => {
-    if (request.method() === 'POST') requests.push(endpoint(request));
-  });
-  page.on('requestfailed', request => {
-    failures.push({ method: request.method(), path: endpoint(request), error: request.failure()?.errorText || 'failed' });
-  });
-  page.on('response', response => {
-    if (response.status() >= 400) {
-      badResponses.push({ method: response.request().method(), path: endpoint(response.request()), status: response.status() });
-    }
-  });
+  let context;
   try {
+    context = await browser.newContext();
+    const page = await context.newPage();
+    const requests = [];
+    const failures = [];
+    const badResponses = [];
+    page.on('request', request => {
+      if (request.method() === 'POST') requests.push(endpoint(request));
+    });
+    page.on('requestfailed', request => {
+      failures.push({ method: request.method(), path: endpoint(request), error: request.failure()?.errorText || 'failed' });
+    });
+    page.on('response', response => {
+      if (response.status() >= 400) {
+        badResponses.push({ method: response.request().method(), path: endpoint(response.request()), status: response.status() });
+      }
+    });
     await page.goto(server.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await dismissTestingNotice(page);
     await page.getByRole('heading', { name: 'Set up dsh-rlm', exact: true }).waitFor({ timeout: 30_000 });
@@ -233,7 +234,7 @@ async function verifyCase(browser, { label, port, destination }) {
       httpErrors: badResponses,
     };
   } finally {
-    await context.close();
+    await context?.close();
     await server.stop();
   }
 }
@@ -250,6 +251,9 @@ try {
     logDir,
     cases: [api, subscription],
   }, null, 2));
+} catch (error) {
+  console.error(sanitize(error?.stack || error));
+  process.exitCode = 1;
 } finally {
   await browser?.close();
 }

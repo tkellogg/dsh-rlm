@@ -7,41 +7,95 @@ window.__ModuleLoader__.load({
     const subscriptions = new Set(["codex", "claude", "grok", "copilot", "antigravity"]);
     const unwrap = r => { if (!r?.ok) throw new Error("Host request failed"); return r.value; };
     const at = (value, path) => path.reduce((v, key) => v?.[key], value);
-    async function loadFacts(ctx) {
-      const describe = ctx.settingsScope.describe();
+    const emptyCatalog = () => ({groups:[],failures:[]});
+    const mergeWarnings = (...groups) => [...new Set(groups.flat().filter(Boolean))];
+    const withTimeout = (promise, milliseconds) => {
+      if (typeof setTimeout !== "function") return Promise.resolve(promise);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Timed out")), milliseconds);
+        Promise.resolve(promise).then(
+          value => { clearTimeout(timer); resolve(value); },
+          error => { clearTimeout(timer); reject(error); }
+        );
+      });
+    };
+    const attempt = async (warnings, label, fn, fallback, timeout=15000) => {
+      try { return await withTimeout(fn(), timeout); }
+      catch { warnings.push(`${label} unavailable. Refresh or open its settings below.`); return fallback; }
+    };
+    async function loadDirectory(ctx) {
       const warnings = [];
-      // Independent capabilities: a catalog/auth failure must not erase the directory.
-      const attempt = async (label, fn, fallback) => {
-        try { return await fn(); }
-        catch { warnings.push(`${label} unavailable. Refresh or open its settings below.`); return fallback; }
-      };
-      const [live, declared, catalog] = await Promise.all([
-        attempt("Active providers", () => ctx.remote.llm.listProviders().then(unwrap), []),
-        attempt("Provider directory", () => ctx.remote.llm.listConfigurableProviders().then(unwrap), []),
-        attempt("Model catalog", () => ctx.remote.session.modelCatalog().then(unwrap), {groups:[],failures:[]}),
-        attempt("Settings", () => describe.ensure(), undefined)
+      // These are in-memory Host projections. Publish them before settings,
+      // credentials, subscription stores, or model discovery can delay the UI.
+      const [live, declared] = await Promise.all([
+        attempt(warnings, "Active providers", () => ctx.remote.llm.listProviders().then(unwrap), []),
+        attempt(warnings, "Provider directory", () => ctx.remote.llm.listConfigurableProviders().then(unwrap), [])
       ]);
-      const view = describe.getSnapshot().view;
+      const rows = declared.map(d => ({
+        ...d,
+        active: live.some(p => p.id === d.provider),
+        authSection: subscriptions.has(d.provider) ? "subscriptions" : "models",
+        auth: "unknown"
+      }));
+      for (const provider of live) if (!rows.some(row => row.provider === provider.id)) rows.push({
+        provider:provider.id,
+        displayName:provider.name,
+        active:true,
+        settingsPath:[],
+        authSection:subscriptions.has(provider.id) ? "subscriptions" : "models",
+        auth:"unknown"
+      });
+      return {rows, catalog:emptyCatalog(), warnings, authenticationLoaded:false};
+    }
+    async function loadAuthentication(ctx, facts) {
+      const warnings = [];
+      const describe = ctx.settingsScope.describe();
+      const settings = attempt(warnings, "Settings", async () => {
+        await describe.ensure();
+        return describe.getSnapshot().view;
+      }, undefined);
+      const subscriptionStatus = facts.rows.some(row => subscriptions.has(row.provider))
+        ? attempt(warnings, "Subscription status", async () => unwrap(await ctx.connection.rpc.call("/api", "subscriptions-auth.status", {})).providers, undefined)
+        : Promise.resolve(undefined);
+      const [view, auth] = await Promise.all([settings, subscriptionStatus]);
       if (!view) warnings.push("Settings unavailable. Open this app through its authenticated localhost URL to configure providers.");
-      const rows = declared.map(d => ({ ...d, active: live.some(p => p.id === d.provider) }));
-      for (const p of live) if (!rows.some(r => r.provider === p.id)) rows.push({provider:p.id, displayName:p.name, active:true, settingsPath:[]});
-      let auth = null;
-      if (rows.some(r => subscriptions.has(r.provider))) {
-        try { auth = unwrap(await ctx.connection.rpc.call("/api", "subscriptions-auth.status", {})).providers; } catch { /* absent adapter or status unavailable is not authenticated */ }
-      }
-      for (const row of rows) {
-        const ns = view?.namespaces.find(n => n.ns === row.settingsNs);
+      const rows = facts.rows.map(row => {
+        const ns = view?.namespaces.find(item => item.ns === row.settingsNs);
         const profile = at(ns?.value, row.settingsPath || []);
-        row.ref = profile?.apiKeyEnv;
-        row.authSection = subscriptions.has(row.provider) ? "subscriptions" : "models";
-        row.auth = subscriptions.has(row.provider)
-          ? (auth?.[row.provider]?.accounts?.length > 0 ? "stored" : "missing")
-          : !view ? "unknown" : row.ref ? "missing" : "external";
+        const ref = profile?.apiKeyEnv;
+        return {
+          ...row,
+          ref,
+          auth: subscriptions.has(row.provider)
+            ? auth === undefined ? "unknown" : auth?.[row.provider]?.accounts?.length > 0 ? "stored" : "missing"
+            : !view ? "unknown" : ref ? "unknown" : "external"
+        };
+      });
+      const refs = [...new Set(rows.map(row => row.ref).filter(Boolean))];
+      const credentials = refs.length
+        ? await attempt(warnings, "Credential status", async () => unwrap(await ctx.remote.credentials.describe(refs)), undefined)
+        : {};
+      for (const row of rows) if (row.ref && !subscriptions.has(row.provider)) {
+        row.auth = credentials === undefined ? "unknown" : credentials[row.ref]?.configured === true ? "stored" : "missing";
       }
-      const refs = [...new Set(rows.map(r => r.ref).filter(Boolean))];
-      const credentials = refs.length ? await attempt("Credential status", async () => unwrap(await ctx.remote.credentials.describe(refs)), {}) : {};
-      for (const row of rows) if (row.ref && !subscriptions.has(row.provider)) row.auth = credentials[row.ref]?.configured === true ? "stored" : "missing";
-      return { rows, catalog, warnings };
+      return {...facts, rows, warnings:mergeWarnings(facts.warnings, warnings), authenticationLoaded:true};
+    }
+    async function loadCatalog(ctx, provider) {
+      const warnings = [];
+      if (!provider) {
+        const catalog = await attempt(warnings, "Model catalog", async () => unwrap(await ctx.remote.session.modelCatalog()), emptyCatalog(), 30000);
+        return {catalog, warnings};
+      }
+      const catalog = await attempt(warnings, "Model catalog", async () => unwrap(await ctx.connection.rpc.call("/api", "dsh-rlm/provider-catalog", {provider})), emptyCatalog(), 30000);
+      return {catalog, warnings};
+    }
+    async function loadFacts(ctx) {
+      const directory = await loadDirectory(ctx);
+      const [authenticated, catalog] = await Promise.all([
+        loadAuthentication(ctx, directory),
+        loadCatalog(ctx)
+      ]);
+      return {...authenticated, catalog:catalog.catalog, warnings:mergeWarnings(authenticated.warnings, catalog.warnings)};
     }
     function selectable(facts, provider, model, externalConfirmed) {
       const row = facts?.rows.find(r => r.provider === provider);
@@ -50,7 +104,10 @@ window.__ModuleLoader__.load({
     }
     async function saveDefault(ctx, facts, provider, model, externalConfirmed) {
       // Re-read adapter/auth facts before any write: a listed model is not an auth test.
-      const fresh = await loadFacts(ctx);
+      const directory = await loadDirectory(ctx);
+      const authenticated = await loadAuthentication(ctx, directory);
+      const catalog = await loadCatalog(ctx, provider);
+      const fresh = {...authenticated, catalog:catalog.catalog, warnings:mergeWarnings(authenticated.warnings, catalog.warnings)};
       if (!selectable(fresh, provider, model, externalConfirmed)) throw new Error("Provider is not configured");
       const scope = ctx.settingsScope.bind({ namespace: "agent-default-model" });
       const before = scope.getSnapshot();
@@ -70,28 +127,69 @@ window.__ModuleLoader__.load({
       const [model, setModel] = React.useState("");
       const [external, setExternal] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
+      const [catalogBusy, setCatalogBusy] = React.useState(false);
       const [message, setMessage] = React.useState("");
       const [saved, setSaved] = React.useState(false);
       const alive = React.useRef(true);
       const generation = React.useRef(0);
-      const refresh = async () => {
-        const g = ++generation.current;
-        setBusy(true); setMessage(""); setSaved(false);
-        try {
-          const next = await loadFacts(ctx);
-          if (alive.current && g === generation.current) {
-            setFacts(next);
-            const savedDefault = ctx.settingsScope.bind({namespace:"agent-default-model"}).getSnapshot().user;
-            if (complete && savedDefault?.provider && savedDefault?.model && selectable(next, savedDefault.provider, savedDefault.model, false)) complete();
+      const catalogGeneration = React.useRef(0);
+      const publishIfCurrent = (g, update) => {
+        if (!alive.current || g !== generation.current) return false;
+        setFacts(current => update(current));
+        return true;
+      };
+      const enrichAuthentication = async (g, directory) => {
+        const authenticated = await loadAuthentication(ctx, directory);
+        if (publishIfCurrent(g, current => current ? {...authenticated, catalog:current.catalog} : authenticated)) {
+          const savedDefault = ctx.settingsScope.bind({namespace:"agent-default-model"}).getSnapshot().user;
+          if (complete && savedDefault?.provider && savedDefault?.model) {
+            // Completion is security-sensitive: re-read the catalog/auth facts,
+            // but never hold the provider directory behind this validation.
+            const catalog = await loadCatalog(ctx, savedDefault.provider);
+            const checked = {...authenticated, catalog:catalog.catalog, warnings:mergeWarnings(authenticated.warnings, catalog.warnings)};
+            if (alive.current && g === generation.current && selectable(checked, savedDefault.provider, savedDefault.model, false)) complete();
           }
         }
-        catch { if (alive.current && g === generation.current) { setMessage("Setup could not refresh. Open Models or Subscriptions below to connect your provider, then return and retry."); } }
+      };
+      const refresh = async () => {
+        const g = ++generation.current;
+        ++catalogGeneration.current;
+        setBusy(true); setCatalogBusy(false); setMessage(""); setSaved(false);
+        try {
+          const directory = await loadDirectory(ctx);
+          if (publishIfCurrent(g, () => directory)) {
+            setBusy(false);
+            if (provider) void requestCatalog(provider);
+            void enrichAuthentication(g, directory).catch(() => {
+              if (alive.current && g === generation.current) setMessage("Authentication state is still loading. Provider navigation remains available; retry before saving a default.");
+            });
+          }
+        }
+        catch { if (alive.current && g === generation.current) { setMessage("Setup could not refresh the local provider directory. Open Models or Subscriptions below, then return and retry."); } }
         finally { if (alive.current && g === generation.current) setBusy(false); }
       };
-      React.useEffect(() => { alive.current = true; refresh(); return () => { alive.current = false; ++generation.current; }; }, [ctx]);
+      const requestCatalog = async selected => {
+        const g = ++catalogGeneration.current;
+        if (!selected) { setCatalogBusy(false); return; }
+        setCatalogBusy(true);
+        try {
+          const result = await loadCatalog(ctx, selected);
+          if (alive.current && g === catalogGeneration.current) setFacts(current => current && ({
+            ...current,
+            catalog:result.catalog,
+            warnings:mergeWarnings(current.warnings, result.warnings)
+          }));
+        } finally { if (alive.current && g === catalogGeneration.current) setCatalogBusy(false); }
+      };
+      React.useEffect(() => { alive.current = true; refresh(); return () => { alive.current = false; ++generation.current; ++catalogGeneration.current; }; }, [ctx]);
       const row = facts?.rows.find(r => r.provider === provider);
       const models = facts?.catalog.groups.find(g => g.id === provider)?.models || [];
-      const changeProvider = e => { setProvider(e.target.value); setModel(""); setExternal(false); setSaved(false); setMessage(""); };
+      const changeProvider = e => {
+        const selected = e.target.value;
+        setProvider(selected); setModel(""); setExternal(false); setSaved(false); setMessage("");
+        setFacts(current => current && ({...current,catalog:emptyCatalog()}));
+        void requestCatalog(selected);
+      };
       const save = async () => {
         setBusy(true); setSaved(false); setMessage("");
         try { await saveDefault(ctx, facts, provider, model, external); if (alive.current) { setSaved(true); setMessage("Default model saved and read back. No inference request was made; credentials and model access are not network-tested."); } }
@@ -107,7 +205,7 @@ window.__ModuleLoader__.load({
           button("Set up an API provider", () => { complete?.(); openSection("models"); })),
         (facts?.warnings || []).map(w => h("p", {key:w,role:"status"}, w)),
         h("label", null, "1. Provider", h("select", {value:provider, onChange:changeProvider, disabled:busy, style:{display:"block",width:"100%",padding:8}},
-          h("option", {value:""}, "Choose a provider"), ...(facts?.rows || []).map(r => h("option", {key:r.provider,value:r.provider}, `${r.displayName} (${r.provider})${r.active ? "" : " — adapter inactive"}`)))),
+          h("option", {value:""}, busy && !facts ? "Loading local providers…" : "Choose a provider"), ...(facts?.rows || []).map(r => h("option", {key:r.provider,value:r.provider}, `${r.displayName} (${r.provider})${r.active ? "" : " — adapter inactive"}`)))),
         facts && !facts.rows.length && h("p", {role:"alert"}, "No providers could be listed yet. Open Subscriptions or Models above to configure a provider, then return to Setup and refresh."),
         row && h("div", null,
           h("h3", null, "2. Authentication"),
@@ -116,10 +214,11 @@ window.__ModuleLoader__.load({
           openSection && button("Open authentication settings", () => { complete?.(); openSection(row.authSection); }, busy),
           row.auth === "external" && h("label", null, h("input", {type:"checkbox",checked:external,disabled:busy,onChange:e=>{setExternal(e.target.checked);setSaved(false);}}), " I configured this adapter's external authentication (not verified).")),
         h("label", null, "3. Default model", h("select", {value:model, disabled:busy || !row?.active, onChange:e=>{setModel(e.target.value);setSaved(false);}, style:{display:"block",width:"100%",padding:8}},
-          h("option", {value:""}, "Choose an advertised model"), ...models.map(m=>h("option",{key:m.id,value:m.id},m.name || m.id)))),
-        row && !models.length && h("p", null, "No model catalog available for this route. Authenticate/configure the adapter and refresh; setup is not complete."),
+          h("option", {value:""}, catalogBusy ? "Loading models for this provider…" : "Choose an advertised model"), ...models.map(m=>h("option",{key:m.id,value:m.id},m.name || m.id)))),
+        row && catalogBusy && h("p", {role:"status"}, "Loading models for the selected provider. Provider navigation and authentication settings remain available."),
+        row && !catalogBusy && !models.length && h("p", null, "No model catalog available for this route. Authenticate/configure the adapter and refresh; setup is not complete."),
         h("p", null, "Catalogs are advisory and may be cached. Saving affects future agents, not existing sessions. Use Models settings for custom model IDs."),
-        h("div", null, button(busy ? "Working…" : "Refresh provider state", refresh, busy), button("Save default model", save, busy || !selectable(facts,provider,model,external))),
+        h("div", null, button(busy ? "Loading providers…" : "Refresh provider state", refresh, busy), button("Save default model", save, busy || catalogBusy || !selectable(facts,provider,model,external))),
         message && h("p", {role:"status"}, message),
         complete && button(saved ? "Continue" : "Configure later (not complete)", complete, busy));
     }
@@ -137,6 +236,6 @@ window.__ModuleLoader__.load({
       ctx.slots.inject("settings.onboarding", () => ctx.slots.register({name:"settings.onboarding", id:"deepseek-official", priority:-100, order:0, inject}, Onboarding));
       ctx.slots.inject("settings.section", () => ctx.slots.register({name:"settings.section", id:"dsh-rlm-setup", order:5, label:()=>"Setup", inject}, Setup));
     }
-    return { apply, inject:["slots","remote","remote.llm","remote.session","remote.credentials","settingsScope","connection"], loadFacts, selectable, saveDefault };
+    return { apply, inject:["slots","remote","remote.llm","remote.session","remote.credentials","settingsScope","connection"], loadDirectory, loadAuthentication, loadCatalog, loadFacts, selectable, saveDefault };
   }
 });

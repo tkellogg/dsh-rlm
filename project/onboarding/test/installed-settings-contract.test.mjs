@@ -101,7 +101,7 @@ test('credential failure preserves API directory but never confirms authenticati
   }};
   const facts=await plugin.loadFacts(ctx);
   assert.equal(facts.rows[0].provider,'api');
-  assert.equal(facts.rows[0].auth,'missing');
+  assert.equal(facts.rows[0].auth,'unknown');
   assert.ok(facts.warnings.some(w=>w.includes('Credential status')));
   assert.equal(plugin.selectable(facts,'api','model',true),false);
 });

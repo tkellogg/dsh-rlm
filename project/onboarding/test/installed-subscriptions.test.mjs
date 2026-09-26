@@ -39,6 +39,7 @@ test('onboarding consumes the real installed subscription status Fetch/RPC contr
   let saved={status:'ready',writable:true,revision:4,value:{provider:'old',model:'old',reasoningEffort:'high',unrelated:'preserved'}};
   const ctx={
     connection:{rpc:{async call(channel,method,payload){
+      if(method==='dsh-rlm/provider-catalog') return ok({groups:[{id:payload.provider,models:[{id:'model'}]}],failures:[]});
       const route=routes.get(`${channel}/${method}`);assert.ok(route,'installed endpoint must exist');
       const response=await route.fetch(new Request(`http://offline.invalid${route.path}`,{
         method:'POST',headers:{'content-type':'application/json'},

@@ -17,11 +17,47 @@ function fixture({provider='codex', accounts=[{}], ref, writable=true, commit=tr
       session:{modelCatalog:async()=>ok(catalog)},
       credentials:{describe:async()=>ok(ref?{[ref]:{configured:true}}:{})}
     },
-    connection:{rpc:{call:async(channel,endpoint)=>{assert.equal(channel,'/api');assert.equal(endpoint,'subscriptions-auth.status');return ok({providers:{[provider]:{accounts}}});}}},
+    connection:{rpc:{call:async(channel,endpoint)=>{assert.equal(channel,'/api');
+      if(endpoint==='subscriptions-auth.status') return ok({providers:{[provider]:{accounts}}});
+      if(endpoint==='dsh-rlm/provider-catalog') return ok(catalog);
+      assert.fail(`unexpected endpoint ${endpoint}`);}}},
     settingsScope:{describe:()=>({ensure:async()=>{},getSnapshot:()=>({view:{namespaces:[{ns:'adapter',value:ref?{apiKeyEnv:ref}:{}}]}})}),bind:({namespace})=>{assert.equal(namespace,'agent-default-model');return scope;}}
   };
   return {ctx,writes,catalog,scope};
 }
+
+test('directory resolves before deferred catalog and authentication',async()=>{
+  const {ctx}=fixture();
+  let releaseCatalog, releaseAuth;
+  ctx.connection.rpc.call=(channel,endpoint)=>new Promise(resolve=>{
+    if(endpoint==='dsh-rlm/provider-catalog') releaseCatalog=()=>resolve(ok({groups:[],failures:[]}));
+    else releaseAuth=()=>resolve(ok({providers:{codex:{accounts:[]}}}));
+  });
+  const directory=await plugin.loadDirectory(ctx);
+  assert.equal(directory.rows[0].provider,'codex');
+  assert.equal(directory.rows[0].auth,'unknown');
+  assert.equal(directory.authenticationLoaded,false);
+  let catalogDone=false,authDone=false;
+  const catalog=plugin.loadCatalog(ctx,'codex').then(value=>{catalogDone=true;return value;});
+  const auth=plugin.loadAuthentication(ctx,directory).then(value=>{authDone=true;return value;});
+  await Promise.resolve();
+  assert.equal(catalogDone,false);assert.equal(authDone,false);
+  releaseCatalog(); releaseAuth();
+  assert.equal((await catalog).catalog.groups.length,0);
+  assert.equal((await auth).rows[0].auth,'missing');
+});
+
+test('provider-scoped catalog projection excludes unrelated routes',async()=>{
+  const {ctx}=fixture();
+  ctx.connection.rpc.call=async(channel,endpoint)=>{
+    assert.equal(channel,'/api'); assert.equal(endpoint,'dsh-rlm/provider-catalog');
+    return ok({groups:[{id:'codex',models:[{id:'wanted'}]}],failures:[]});
+  };
+  const result=await plugin.loadCatalog(ctx,'codex');
+  assert.deepEqual(Array.from(result.catalog.groups,g=>g.id),['codex']);
+  assert.equal(result.catalog.failures.length,0);
+});
+
 test('supported cell shadowing preserves models and welcome registrations',()=>{
   const registrations=[];
   plugin.apply({slots:{inject:(_,f)=>f(),register:(options,component)=>registrations.push({options,component})}});
