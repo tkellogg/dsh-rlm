@@ -6,8 +6,13 @@ with your choice of inference provider.
 
 ## Run with uv
 
-**Release preparation:** these are the intended public commands. The PyPI package
-and matching application assets must be published before they are usable.
+**Experimental release:** [v0.1.0](https://github.com/tkellogg/dsh-rlm/releases/tag/v0.1.0) is available for **macOS Apple Silicon only**. PyPI upload is pending credentials. Until then, run the published wheel directly:
+
+```sh
+uvx --from https://github.com/tkellogg/dsh-rlm/releases/download/v0.1.0/dsh_rlm-0.1.0-py3-none-any.whl dsh-rlm
+```
+
+After PyPI publication, the short command will be:
 
 ```sh
 uvx dsh-rlm
